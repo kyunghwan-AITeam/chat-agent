@@ -376,10 +376,11 @@ name = "chat-agent"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-community" },
     { name = "langchain-openai" },
-    { name = "open-meteo-weather-mcp" },
+    { name = "mcp" },
     { name = "openai" },
     { name = "prompt-toolkit" },
     { name = "python-dotenv" },
@@ -387,10 +388,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "langchain", specifier = ">=0.3.0" },
     { name = "langchain-community", specifier = ">=0.3.0" },
     { name = "langchain-openai", specifier = ">=0.2.0" },
-    { name = "open-meteo-weather-mcp", editable = "open-meteo-weather-mcp" },
+    { name = "mcp", specifier = ">=1.0.0" },
     { name = "openai", specifier = ">=1.7.2" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
@@ -1407,17 +1409,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/f0/8404db5098d92446b3e3695cf41c6f0ecb703d701cb0b7566ee2177f2eee/numpy-2.3.4-pp311-pypy311_pp73-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:13b9062e4f5c7ee5c7e5be96f29ba71bc5a37fed3d1d77c37390ae00724d296d", size = 16760806, upload-time = "2025-10-15T16:18:06.668Z" },
     { url = "https://files.pythonhosted.org/packages/95/8e/2844c3959ce9a63acc7c8e50881133d86666f0420bcde695e115ced0920f/numpy-2.3.4-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:81b3a59793523e552c4a96109dde028aa4448ae06ccac5a76ff6532a85558a7f", size = 12973130, upload-time = "2025-10-15T16:18:09.397Z" },
 ]
-
-[[package]]
-name = "open-meteo-weather-mcp"
-version = "0.1.0"
-source = { editable = "open-meteo-weather-mcp" }
-dependencies = [
-    { name = "mcp" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "mcp", specifier = ">=0.1.0" }]
 
 [[package]]
 name = "openai"

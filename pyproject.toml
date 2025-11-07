@@ -11,7 +11,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "openai>=1.7.2",
     "prompt-toolkit>=3.0.0",
-    "open-meteo-weather-mcp",
+    "mcp>=1.0.0",
+    "httpx>=0.27.0"
 ]
 
 [project.scripts]
@@ -27,5 +28,3 @@ packages = ["src"]
 [tool.uv]
 dev-dependencies = []
 
-[tool.uv.sources]
-open-meteo-weather-mcp = { path = "open-meteo-weather-mcp", editable = true }
