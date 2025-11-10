@@ -143,19 +143,12 @@ class MCPClient:
             "mcp-session-id": session_id
         }
 
-        print(f"\n[MCP] Calling {service}/{tool_name} with args: {arguments}")
-
         try:
             response = await self.client.post(url, json=payload, headers=headers)
             response.raise_for_status()
 
-            print(f"[MCP] Response status: {response.status_code}")
-            print(f"[MCP] Response headers: {dict(response.headers)}")
-
             # Handle Server-Sent Events (SSE) streaming response
             content = response.text
-            print(f"[MCP] Response content length: {len(content)}")
-            print(f"[MCP] Response content preview: {content[:500]}")
 
             if content:
                 import json
@@ -166,23 +159,17 @@ class MCPClient:
                         json_str = line[5:].strip()  # Remove "data:" prefix
                         try:
                             result = json.loads(json_str)
-                            print(f"[MCP] Parsed result: {result}")
                             if "error" in result:
                                 raise Exception(f"MCP Error: {result['error']}")
                             # Extract the actual result content
                             final_result = result.get("result", {})
-                            print(f"[MCP] Final result: {final_result}")
                             return final_result
-                        except json.JSONDecodeError as e:
-                            print(f"[MCP] Warning: Failed to parse JSON: {e}")
-                            print(f"[MCP] JSON string was: {json_str[:200]}")
+                        except json.JSONDecodeError:
                             continue
 
-            print("[MCP] No content in response, returning empty dict")
             return {}
 
         except httpx.HTTPError as e:
-            print(f"[MCP] HTTP Error: {e}")
             raise Exception(f"HTTP Error calling MCP tool: {str(e)}")
 
     async def list_tools(self, service: str) -> List[Dict[str, Any]]:
@@ -294,11 +281,21 @@ class MCPToolWrapper:
             # We're in an async context, run in thread pool
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, self._async_run(**kwargs))
+                future = executor.submit(self._run_in_new_loop, **kwargs)
                 return future.result()
         except RuntimeError:
-            # No running loop, we can use asyncio.run
-            return asyncio.run(self._async_run(**kwargs))
+            # No running loop, create a new one
+            return self._run_in_new_loop(**kwargs)
+
+    def _run_in_new_loop(self, **kwargs) -> str:
+        """Run async function in a new event loop."""
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(self._async_run(**kwargs))
+        finally:
+            loop.close()
 
     async def _async_run(self, **kwargs) -> str:
         """Async implementation of run."""

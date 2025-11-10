@@ -23,17 +23,17 @@ def create_weather_tool(mcp_base_url: str = "https://localhost:22000", verify_ss
         mcp_client=mcp_client,
         service="weather",
         tool_name="get_current_weather",
-        tool_description="Get current weather information for a location"
+        tool_description="Get current weather and short-term forecast (up to 7 days) for a location using Open-Meteo API"
     )
 
     def get_weather(location: str) -> str:
-        """Get current weather for a location.
+        """Get current weather and short-term forecast for a location.
 
         Args:
-            location: Name of the location (e.g., 'Seoul', 'New York', 'Tokyo')
+            location: Name of the location in ENGLISH (e.g., 'Seoul', 'New York', 'Tokyo', 'London')
 
         Returns:
-            Weather information as a string
+            Weather information including current conditions and daily forecast (up to 3 days by default)
         """
         return wrapper.run(location=location)
 
@@ -41,9 +41,10 @@ def create_weather_tool(mcp_base_url: str = "https://localhost:22000", verify_ss
         func=get_weather,
         name="get_weather",
         description=(
-            "Useful for getting current weather information for a specific location. "
-            "Input should be a location name (e.g., 'Seoul', 'New York', 'Tokyo'). "
-            "Returns current weather conditions including temperature, conditions, and forecast."
+            "Useful for getting current weather and short-term forecast (up to 7 days) for a specific location. "
+            "IMPORTANT: Input location must be in ENGLISH (e.g., 'Seoul', 'New York', 'Tokyo', 'London'). "
+            "Returns current weather conditions (temperature, wind, weather code) and daily forecast "
+            "(max/min temperature, precipitation probability) for the next few days."
         )
     )
 
