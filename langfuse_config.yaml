@@ -1,0 +1,21 @@
+# Langfuse Configuration
+# LLM 호출 추적 및 모니터링을 위한 Langfuse 설정
+langfuse:
+  # Langfuse 활성화 여부 (.env의 LANGFUSE_ENABLED로도 제어 가능)
+  enabled: true
+
+  # 디버그 모드 (상세 로그 출력)
+  debug: true
+
+  # 이벤트 버퍼 크기 (이 수만큼 이벤트가 모이면 전송)
+  flush_at: 15
+
+  # 이벤트 전송 간격 (초)
+  flush_interval: 0.5
+
+  # 태그 설정 (추적 데이터에 태그 추가)
+  # 환경 변수 사용 가능: ${VAR_NAME:default_value}
+  tags:
+    - "smart-home"
+    - "korean-llm"
+    - "${LANGFUSE_ENVIRONMENT:development}"

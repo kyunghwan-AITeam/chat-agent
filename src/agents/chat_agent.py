@@ -3,11 +3,14 @@ LangChain Chat Agent with Ollama (via OpenAI-compatible API)
 """
 import re
 import ast
+import time
 from typing import List, Dict, Any, Optional, Tuple
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 
+from langfuse import get_client, propagate_attributes
+from langfuse.langchain import CallbackHandler
 
 class ChatAgent:
     """LangChain 기반 대화형 AI Agent (Ollama 연동)"""
@@ -20,7 +23,9 @@ class ChatAgent:
         api_key: str = "ollama",
         system_prompt: Optional[str] = None,
         tools: Optional[List[Any]] = None,
-        use_agent: bool = False
+        use_agent: bool = False,
+        enable_langfuse: bool = False,
+        session_id: Optional[str] = None
     ):
         """
         Initialize Chat Agent
@@ -33,6 +38,8 @@ class ChatAgent:
             system_prompt: Custom system prompt (default: simple assistant prompt)
             tools: List of LangChain tools to use (default: None)
             use_agent: Whether to use agent with tools (default: False)
+            enable_langfuse: Whether to enable Langfuse tracing (default: False)
+            session_id: Session ID for Langfuse tracing (default: None)
         """
         # Initialize LLM
         self.llm = ChatOpenAI(
@@ -42,9 +49,13 @@ class ChatAgent:
             temperature=temperature
         )
 
+        self.model = model
+        self.temperature = temperature
         self.chat_history: List[Any] = []
         self.tools = tools or []
         self.use_agent = use_agent and len(self.tools) > 0
+        self.session_id = session_id
+        self.handler = None
 
         # Use custom system prompt or default
         if system_prompt is None:
@@ -224,7 +235,10 @@ You called some tools and got these results:
 
 Based on these tool results, provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
 
-                interpretation_response = self.llm.invoke(interpretation_prompt)
+                interpretation_response = self.llm.invoke(
+                    interpretation_prompt,
+                    config={"callbacks": [self.handler]} if self.handler else {}
+                )
                 final_response = str(interpretation_response.content) if hasattr(interpretation_response, 'content') else str(interpretation_response)
 
                 # Prepend thought if it existed
@@ -241,7 +255,7 @@ Based on these tool results, provide a natural, conversational response to the u
             return content
         return str(response)
 
-    def _handle_tool_calls_streaming(self, response: Any, original_message: str = ""):
+    async def _handle_tool_calls_streaming(self, response: Any, original_message: str = ""):
         """
         Handle tool calls and stream the LLM interpretation.
 
@@ -279,7 +293,7 @@ Based on these tool results, provide a natural, conversational response to the u
                 for tool in self.tools:
                     if tool.name == tool_name:
                         try:
-                            result = tool.invoke(tool_args)
+                            result = await tool.ainvoke(tool_args)
                             tool_results.append(f"Tool: {tool_name}\nArguments: {tool_args}\nResult: {result}")
                         except Exception as e:
                             tool_results.append(f"Tool: {tool_name}\nArguments: {tool_args}\nError: {str(e)}")
@@ -302,7 +316,10 @@ You called some tools and got these results:
 Based on these tool results, provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
 
                 # Stream LLM interpretation
-                for chunk in self.llm.stream(interpretation_prompt):
+                for chunk in self.llm.stream(
+                    interpretation_prompt,
+                    config={"callbacks": [self.handler]} if self.handler else {}
+                ):
                     if hasattr(chunk, 'content'):
                         content = str(chunk.content)
                         if content:
@@ -328,12 +345,14 @@ Based on these tool results, provide a natural, conversational response to the u
         Returns:
             Agent's response
         """
+        self.handler = CallbackHandler()
         try:
+            # Pass handler to the chain invocation
             # Invoke chain with message and history
             response = self.chain.invoke({
                 "input": message,
-                "chat_history": self.chat_history
-            })
+                "chat_history": self.chat_history}, 
+                config={"callbacks": [self.handler]} )
 
             # Handle tool calls if present
             if self.use_agent:
@@ -361,6 +380,7 @@ Based on these tool results, provide a natural, conversational response to the u
         Yields:
             Chunks of the response as they arrive
         """
+        self.handler = CallbackHandler()
         try:
             full_response = ""
             response_obj = None
@@ -368,10 +388,10 @@ Based on these tool results, provide a natural, conversational response to the u
             # Stream the response
             for chunk in self.chain.stream({
                 "input": message,
-                "chat_history": self.chat_history
-            }):
+                "chat_history": self.chat_history},
+                config={"callbacks": [self.handler]}
+            ):
                 response_obj = chunk
-
                 if hasattr(chunk, 'content'):
                     content = str(chunk.content)
                     if content:
@@ -390,9 +410,22 @@ Based on these tool results, provide a natural, conversational response to the u
                 # Execute tool calls and stream interpretation
                 if hasattr(response_obj, 'tool_calls') and response_obj.tool_calls:
                     yield "\n\n"
-                    for chunk in self._handle_tool_calls_streaming(response_obj, message):
-                        full_response += chunk
-                        yield chunk
+                    # Run async generator in sync context
+                    import asyncio
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+
+                    async_gen = self._handle_tool_calls_streaming(response_obj, message)
+                    while True:
+                        try:
+                            chunk = loop.run_until_complete(async_gen.__anext__())
+                            full_response += chunk
+                            yield chunk
+                        except StopAsyncIteration:
+                            break
 
             # Update chat history after streaming is complete
             self.chat_history.append(HumanMessage(content=message))
