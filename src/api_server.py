@@ -17,6 +17,7 @@ import json
 
 from langfuse import get_client, propagate_attributes
 from langfuse.langchain import CallbackHandler
+from mem0 import Memory
 
 
 # Load environment variables
@@ -116,6 +117,30 @@ app = FastAPI(
     version="1.0.0"
 )
 
+config = {
+    # "vector_store": {
+    #     "provider": "qdrant",
+    #     "config": {"host": "localhost", "port": 6333},
+    # },
+    "llm": {
+        "provider": "ollama",
+        "config": {
+            "model": "qwen3:32b",
+            "ollama_base_url": "http://172.168.0.201:11434",
+            "temperature": 0.1
+        },
+    },
+    # "embedder": {
+    #     "provider": "vertexai",
+    #     "config": {"model": "textembedding-gecko@003"},
+    # },
+    # "reranker": {
+    #     "provider": "cohere",
+    #     "config": {"model": "rerank-english-v3.0"},
+    # },
+}
+
+memory = Memory.from_config(config)
 
 # Pydantic models for OpenAI API compatibility
 class Message(BaseModel):
@@ -203,6 +228,14 @@ def get_or_create_agent(session_id: Optional[str] = None, model: Optional[str] =
         except Exception as e:
             print(f"Warning: Could not load MCP tools: {e}")
 
+    # Add memory search tools
+    try:
+        from tools.memory_tools import create_memory_tools
+        memory_tools = create_memory_tools(memory, user_id=new_session_id)
+        tools.extend(memory_tools)
+    except Exception as e:
+        print(f"Warning: Could not load memory tools: {e}")
+
     agent = ChatAgent(
         model=model,
         temperature=temperature,
@@ -210,7 +243,7 @@ def get_or_create_agent(session_id: Optional[str] = None, model: Optional[str] =
         api_key="LLM",
         system_prompt=HOME_ASSISTANT_PROMPT,
         tools=tools,
-        use_agent=use_mcp_tools and len(tools) > 0,
+        use_agent=len(tools) > 0,  # Enable agent if any tools are available
         enable_langfuse=LANGFUSE_ENABLED,
         session_id=new_session_id
     )
@@ -316,8 +349,16 @@ async def chat_completions(request: ChatCompletionRequest):
                     # Streaming response
                     async def generate_stream():
                         first_chunk = True
+                        full_content = ""
+
+                        # Store user message in memory
+                        try:
+                            memory.add([{"role": "user", "content": user_message}], user_id=session_id)
+                        except Exception as e:
+                            print(f"Warning: Could not save user message to memory: {e}")
 
                         for chunk_text in agent.chat_stream(user_message):
+                            full_content += chunk_text
                             if first_chunk:
                                 # First chunk with role
                                 chunk = ChatCompletionStreamResponse(
@@ -350,6 +391,12 @@ async def chat_completions(request: ChatCompletionRequest):
 
                             yield f"data: {chunk.model_dump_json()}\n\n"
 
+                        # Store assistant response in memory
+                        try:
+                            memory.add([{"role": "assistant", "content": full_content}], user_id=session_id)
+                        except Exception as e:
+                            print(f"Warning: Could not save assistant response to memory: {e}")
+
                         # Final chunk with finish_reason
                         final_chunk = ChatCompletionStreamResponse(
                             id=completion_id,
@@ -377,7 +424,20 @@ async def chat_completions(request: ChatCompletionRequest):
                     )
                 else:
                     # Non-streaming response
+                    # Store user message in memory
+                    try:
+                        memory.add([{"role": "user", "content": user_message}], user_id=session_id)
+                    except Exception as e:
+                        print(f"Warning: Could not save user message to memory: {e}")
+
                     response_text = agent.chat(user_message)
+
+                    # Store assistant response in memory
+                    try:
+                        memory.add([{"role": "assistant", "content": response_text}], user_id=session_id)
+                    except Exception as e:
+                        print(f"Warning: Could not save assistant response to memory: {e}")
+
                     response = ChatCompletionResponse(
                         id=completion_id,
                         created=created_time,

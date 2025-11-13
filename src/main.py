@@ -7,6 +7,42 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from agents.chat_agent import ChatAgent
 from prompts.prompt_builder import build_home_assistant_prompt
+from langchain_ollama import OllamaEmbeddings
+from mem0 import Memory
+
+# ollama_embeddings = OllamaEmbeddings(
+#     base_url="http://172.168.0.201:11434",
+#     model="bge-m3:latest"
+# )
+config = {
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "collection_name": "chat_memories",
+            "embedding_model_dims": 1024,
+            "on_disk": True,
+            "path": "/tmp/qdrant_mem0"
+        },
+    },
+    "llm": {
+        "provider": "ollama",
+        "config": {
+            "model": "qwen3:32b",
+            "ollama_base_url": "http://172.168.0.201:11434",
+            "temperature": 0.1
+        },
+    },
+    "embedder": {
+        "provider": "ollama",
+        "config": {
+            "model": "qwen3-embedding:0.6b",
+            "ollama_base_url": "http://172.168.0.201:11434",
+            "embedding_dims": 1024,
+        },
+    },
+}
+
+memory = Memory.from_config(config)
 
 
 def main():
@@ -17,6 +53,7 @@ def main():
     # Get LLM configuration from environment
     model = os.getenv("LLM_MODEL", "llama3.2")
     base_url = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
+    api_key = os.getenv("LLM_API_KEY", "local")
     temperature = float(os.getenv("TEMPERATURE", "0.7"))
 
     # Get MCP configuration
@@ -40,6 +77,17 @@ def main():
             print(f"Warning: Could not load MCP tools: {e}")
             print("Continuing without MCP tools...")
             tools = []
+
+    # Add memory search tools
+    try:
+        from tools.memory_tools import create_memory_tools
+        memory_tools = create_memory_tools(memory, user_id="alex")
+        tools.extend(memory_tools)
+        print(f"Memory Tools Loaded: {len(memory_tools)} tools available")
+        for tool in memory_tools:
+            print(f"  - {tool.name}: {tool.description[:80]}...")
+    except Exception as e:
+        print(f"Warning: Could not load memory tools: {e}")
 
     # Initialize Langfuse if enabled
     if langfuse_enabled:
@@ -70,10 +118,10 @@ def main():
         model=model,
         temperature=temperature,
         base_url=base_url,
-        api_key="LLM",
+        api_key=api_key,
         system_prompt=system_prompt,
         tools=tools,
-        use_agent=use_mcp_tools and len(tools) > 0,
+        use_agent=len(tools) > 0,  # Enable agent if any tools are available
         enable_langfuse=langfuse_enabled
     )
 
@@ -87,8 +135,10 @@ def main():
     print("  - 'quit', 'exit', 'bye': Exit the program")
     print("  - 'prompt': Show current system prompt")
     print("\nI can help you control your smart home devices!")
-    if use_mcp_tools and tools:
+    if use_mcp_tools and any(tool.name not in ["search_memory", "get_all_memories"] for tool in tools):
         print("I also have access to weather information and web search capabilities via MCP!")
+    if any(tool.name in ["search_memory", "get_all_memories"] for tool in tools):
+        print("I can search through our previous conversations and remember past discussions!")
     print("Try asking me to turn on lights, check temperature, or activate scenes.\n")
 
     # Create prompt session for better input handling (especially Korean)
@@ -119,8 +169,12 @@ def main():
 
             # Get response from agent (streaming)
             print("\nAgent: ", end="", flush=True)
+            memory.add([{"role": "user", "content": user_input}], user_id="alex")
+            full_content = ""
             for chunk in agent.chat_stream(user_input):
                 print(chunk, end="", flush=True)
+                full_content += chunk
+            memory.add([{"role": "assistant", "content": full_content}], user_id="alex")
             print("\n")
 
         except KeyboardInterrupt:

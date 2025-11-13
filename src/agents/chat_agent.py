@@ -233,7 +233,13 @@ You called some tools and got these results:
 
 {tool_context}
 
-Based on these tool results, provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
+IMPORTANT: The tool results may contain mixed Korean/English text (e.g., "Name is 김철수").
+When creating your response:
+1. Translate any English phrases to Korean naturally
+2. Rephrase the information in a conversational Korean style
+3. Example: "Name is 김철수" → "이름은 김철수입니다"
+
+Provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
 
                 interpretation_response = self.llm.invoke(
                     interpretation_prompt,
@@ -313,7 +319,13 @@ You called some tools and got these results:
 
 {tool_context}
 
-Based on these tool results, provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
+IMPORTANT: The tool results may contain mixed Korean/English text (e.g., "Name is 김철수").
+When creating your response:
+1. Translate any English phrases to Korean naturally
+2. Rephrase the information in a conversational Korean style
+3. Example: "Name is 김철수" → "이름은 김철수입니다"
+
+Provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
 
                 # Stream LLM interpretation
                 for chunk in self.llm.stream(
