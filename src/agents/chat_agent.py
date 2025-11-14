@@ -55,6 +55,7 @@ class ChatAgent:
         self.tools = tools or []
         self.use_agent = use_agent and len(self.tools) > 0
         self.session_id = session_id
+        self.enable_langfuse = enable_langfuse
         self.handler = None
 
         # Use custom system prompt or default
@@ -357,14 +358,21 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
         Returns:
             Agent's response
         """
-        self.handler = CallbackHandler()
+        # Create callback handler only if Langfuse is enabled
+        if self.enable_langfuse:
+            self.handler = CallbackHandler(session_id=self.session_id)
+        else:
+            self.handler = None
+
         try:
-            # Pass handler to the chain invocation
+            # Pass handler to the chain invocation only if enabled
+            config = {"callbacks": [self.handler]} if self.handler else {}
+
             # Invoke chain with message and history
             response = self.chain.invoke({
                 "input": message,
-                "chat_history": self.chat_history}, 
-                config={"callbacks": [self.handler]} )
+                "chat_history": self.chat_history},
+                config=config)
 
             # Handle tool calls if present
             if self.use_agent:
@@ -392,16 +400,24 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
         Yields:
             Chunks of the response as they arrive
         """
-        self.handler = CallbackHandler()
+        # Create callback handler only if Langfuse is enabled
+        if self.enable_langfuse:
+            self.handler = CallbackHandler(session_id=self.session_id)
+        else:
+            self.handler = None
+
         try:
             full_response = ""
             response_obj = None
+
+            # Pass handler to the chain streaming only if enabled
+            config = {"callbacks": [self.handler]} if self.handler else {}
 
             # Stream the response
             for chunk in self.chain.stream({
                 "input": message,
                 "chat_history": self.chat_history},
-                config={"callbacks": [self.handler]}
+                config=config
             ):
                 response_obj = chunk
                 if hasattr(chunk, 'content'):

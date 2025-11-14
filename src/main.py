@@ -7,38 +7,52 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from agents.chat_agent import ChatAgent
 from prompts.prompt_builder import build_home_assistant_prompt
-from langchain_ollama import OllamaEmbeddings
 from mem0 import Memory
 
-# ollama_embeddings = OllamaEmbeddings(
-#     base_url="http://172.168.0.201:11434",
-#     model="bge-m3:latest"
-# )
+
+# Load environment variables
+load_dotenv()
+
 config = {
     "vector_store": {
         "provider": "qdrant",
         "config": {
             "collection_name": "chat_memories",
-            "embedding_model_dims": 1024,
+            "embedding_model_dims": 1536,
             "on_disk": True,
             "path": "/tmp/qdrant_mem0"
         },
     },
+    # "llm": {
+    #     "provider": "ollama",
+    #     "config": {
+    #         "model": "qwen3:32b",
+    #         "ollama_base_url": "http://172.168.0.201:11434",
+    #         "temperature": 0.1
+    #     },
+    # },
     "llm": {
-        "provider": "ollama",
+        "provider": "openai",
         "config": {
-            "model": "qwen3:32b",
-            "ollama_base_url": "http://172.168.0.201:11434",
-            "temperature": 0.1
-        },
+            "model": "gpt-4.1-nano-2025-04-14",
+            "temperature": 0.2,
+            "max_tokens": 2000,
+        }
     },
+    # "embedder": {
+    #     "provider": "ollama",
+    #     "config": {
+    #         "model": "qwen3-embedding:0.6b",
+    #         "ollama_base_url": "http://172.168.0.201:11434",
+    #         "embedding_dims": 1024,
+    #     },
+    # },
     "embedder": {
-        "provider": "ollama",
+        "provider": "openai",
         "config": {
-            "model": "qwen3-embedding:0.6b",
-            "ollama_base_url": "http://172.168.0.201:11434",
-            "embedding_dims": 1024,
-        },
+            "model": "text-embedding-3-large",
+            "embedding_dims": 1536,
+        }
     },
 }
 
@@ -47,8 +61,7 @@ memory = Memory.from_config(config)
 
 def main():
     """Main function to run the chat agent"""
-    # Load environment variables
-    load_dotenv()
+
 
     # Get LLM configuration from environment
     model = os.getenv("LLM_MODEL", "llama3.2")
@@ -94,7 +107,8 @@ def main():
         try:
             from utils.langfuse_config import init_langfuse
             init_langfuse()
-            print(f"Langfuse: Enabled ({os.getenv('LANGFUSE_HOST', 'not configured')})")
+            langfuse_host = os.getenv('LANGFUSE_BASE_URL') or os.getenv('LANGFUSE_HOST', 'not configured')
+            print(f"Langfuse: Enabled ({langfuse_host})")
         except Exception as e:
             print(f"Warning: Could not initialize Langfuse: {e}")
             langfuse_enabled = False

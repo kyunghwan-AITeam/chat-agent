@@ -81,12 +81,13 @@ class LangfuseConfig:
         """Initialize Langfuse client"""
         try:
             # Get credentials from environment
-            host = os.getenv('LANGFUSE_HOST')
+            # Support both LANGFUSE_HOST and LANGFUSE_BASE_URL
+            host = os.getenv('LANGFUSE_HOST') or os.getenv('LANGFUSE_BASE_URL')
             public_key = os.getenv('LANGFUSE_PUBLIC_KEY')
             secret_key = os.getenv('LANGFUSE_SECRET_KEY')
 
             if not host:
-                print("Warning: LANGFUSE_HOST not set, disabling Langfuse")
+                print("Warning: LANGFUSE_HOST or LANGFUSE_BASE_URL not set, disabling Langfuse")
                 self.enabled = False
                 return
 

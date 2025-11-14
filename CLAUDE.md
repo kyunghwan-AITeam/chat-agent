@@ -79,6 +79,13 @@ ollama list
    - `create_mcp_tools_async()`: Async tool loading with SSL configuration
    - Legacy files moved to `src/tools/legacy/`
 
+4. **Langfuse Integration** ([src/utils/langfuse_config.py](src/utils/langfuse_config.py))
+   - LLM observability and tracing with Langfuse
+   - `LangfuseConfig`: Configuration manager for Langfuse client
+   - `init_langfuse()`: Initialize Langfuse with environment variables
+   - Conditionally enabled via `LANGFUSE_ENABLED` environment variable
+   - Uses LangChain's `CallbackHandler` for automatic tracing
+
 ### MCP Protocol Flow
 
 The MCP client follows a session-based protocol:
@@ -127,6 +134,13 @@ MCP-specific variables:
 - `USE_MCP_TOOLS`: Enable/disable MCP tools (`true`/`false`)
 - `MCP_BASE_URL`: MCP server base URL (default: `https://localhost:22000`)
 - `MCP_VERIFY_SSL`: SSL verification for MCP (`true`/`false`)
+
+Langfuse-specific variables:
+- `LANGFUSE_ENABLED`: Enable/disable Langfuse tracing (`true`/`false`)
+- `LANGFUSE_BASE_URL` or `LANGFUSE_HOST`: Langfuse server URL (e.g., `http://192.168.3.20:3000`)
+- `LANGFUSE_PUBLIC_KEY`: Public API key from Langfuse (optional)
+- `LANGFUSE_SECRET_KEY`: Secret API key from Langfuse (optional)
+- `LANGFUSE_TRACING_ENVIRONMENT`: Environment tag (e.g., `development`, `production`)
 
 ### Switching System Prompts
 
