@@ -28,7 +28,7 @@ print()
 
 # Test 2: Generate dynamic prompt with tools
 print("2. Generating dynamic prompt WITH tools...")
-from src.prompts.prompt_builder import build_home_assistant_prompt
+from prompts.system_prompt_builder import build_home_assistant_prompt
 
 prompt_with_tools = build_home_assistant_prompt(tools)
 print(f"   ✓ Generated prompt: {len(prompt_with_tools)} characters")

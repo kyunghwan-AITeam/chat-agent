@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from agents.chat_agent import ChatAgent
-from prompts.prompt_builder import build_home_assistant_prompt
+from prompts.system_prompt_builder import build_home_assistant_prompt
 from mem0 import Memory
 
 
@@ -77,19 +77,39 @@ def main():
     # Get Langfuse configuration
     langfuse_enabled = os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"
 
-    # Initialize MCP tools if enabled
+    # Initialize MCP tools and instructions if enabled
     tools = []
+    mcp_instructions = {}
+    mcp_tools_by_server = {}
     if use_mcp_tools:
         try:
-            from tools.mcp_tools_v2 import create_mcp_tools
-            tools = create_mcp_tools(mcp_base_url, mcp_verify_ssl)
-            print(f"MCP Tools Loaded: {len(tools)} tools available")
-            for tool in tools:
-                print(f"  - {tool.name}: {tool.description[:80] if hasattr(tool, 'description') and tool.description else 'No description'}...")
+            from tools.mcp_tools_v2 import (
+                create_mcp_tools,
+                get_mcp_server_instructions,
+                get_mcp_tools_by_server
+            )
+
+            # Get MCP tools grouped by server
+            mcp_tools_by_server = get_mcp_tools_by_server(mcp_base_url, mcp_verify_ssl)
+
+            # Flatten tools for agent use (backward compatibility)
+            for server_tools in mcp_tools_by_server.values():
+                tools.extend(server_tools)
+
+            print(f"MCP Tools Loaded: {len(tools)} tools from {len(mcp_tools_by_server)} servers")
+            for server_name, server_tools in mcp_tools_by_server.items():
+                print(f"  [{server_name}] {len(server_tools)} tools")
+
+            # Get MCP server instructions
+            agent_instructions = get_mcp_server_instructions(mcp_base_url, mcp_verify_ssl)
+            if agent_instructions:
+                print(f"AGENT Instructions Loaded from {len(agent_instructions)} servers")
         except Exception as e:
-            print(f"Warning: Could not load MCP tools: {e}")
-            print("Continuing without MCP tools...")
+            print(f"Warning: Could not load AGENT tools: {e}")
+            print("Continuing without AGENT tools...")
             tools = []
+            mcp_instructions = {}
+            mcp_tools_by_server = {}
 
     # Add memory search tools
     try:
@@ -113,8 +133,10 @@ def main():
             print(f"Warning: Could not initialize Langfuse: {e}")
             langfuse_enabled = False
 
-    # Build dynamic system prompt based on available tools
-    system_prompt = build_home_assistant_prompt(tools if use_mcp_tools and tools else None)
+    # Build dynamic system prompt based on MCP servers
+    system_prompt = build_home_assistant_prompt(
+        agent_instructions=agent_instructions if agent_instructions else None,
+    )
 
     # Initialize agent with Home Assistant prompt
     print(f"\nInitializing Home Assistant Chat Agent with LLM...")
@@ -134,7 +156,7 @@ def main():
         base_url=base_url,
         api_key=api_key,
         system_prompt=system_prompt,
-        tools=tools,
+        agents=tools,
         use_agent=len(tools) > 0,  # Enable agent if any tools are available
         enable_langfuse=langfuse_enabled
     )

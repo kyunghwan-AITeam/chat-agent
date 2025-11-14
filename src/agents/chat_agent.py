@@ -4,6 +4,7 @@ LangChain Chat Agent with Ollama (via OpenAI-compatible API)
 import re
 import ast
 import time
+import json
 from typing import List, Dict, Any, Optional, Tuple
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -22,7 +23,7 @@ class ChatAgent:
         base_url: str = "http://localhost:11434/v1",
         api_key: str = "ollama",
         system_prompt: Optional[str] = None,
-        tools: Optional[List[Any]] = None,
+        agents: Optional[List[Any]] = None,
         use_agent: bool = False,
         enable_langfuse: bool = False,
         session_id: Optional[str] = None
@@ -99,7 +100,7 @@ class ChatAgent:
             remaining_text = remaining_text.replace(thought_match.group(0), '', 1).strip()
 
         # Extract TOOL_CALL
-        tool_call_match = re.search(r'<TOOL_CALL>\s*(.*?)\s*</TOOL_CALL>', content, re.DOTALL)
+        tool_call_match = re.search(r'<AGENT_CALL>\s*(.*?)\s*</AGENT_CALL>', content, re.DOTALL)
         if tool_call_match:
             tool_call = tool_call_match.group(1).strip()
             remaining_text = remaining_text.replace(tool_call_match.group(0), '', 1).strip()
@@ -120,64 +121,67 @@ class ChatAgent:
         Returns list of dicts: [{'name': 'func1', 'args': {'arg1': 'val1'}}, ...]
         """
         if not content:
+            print("No content to parse for tool calls.")
             return []
 
         # Extract content from <TOOL_CALL> tags if present
-        tool_call_match = re.search(r'<TOOL_CALL>\s*(.*?)\s*</TOOL_CALL>', content, re.DOTALL)
-        if tool_call_match:
-            content = tool_call_match.group(1).strip()
+        agent_call_match = re.search(r'<AGENT_CALL>\s*(.*?)\s*</AGENT_CALL>', content, re.DOTALL)
+        agent_call_str = ''
+        if agent_call_match:
+            agent_call_str = agent_call_match.group(1).strip()
 
-        # Remove markdown code blocks
-        content = re.sub(r'```(?:tool_code|python)?\s*\n', '', content)
-        content = re.sub(r'\n?```\s*$', '', content)
-        content = content.strip()
+        # # Remove markdown code blocks
+        # agent_call_str = re.sub(r'```(?:tool_code|python)?\s*\n', '', agent_call_str)
+        # agent_call_str = re.sub(r'\n?```\s*$', '', agent_call_str)
+        # agent_call_str = agent_call_str.strip()
 
-        # Fix common model errors
-        content = re.sub(r"(\]|'|\")r(?=\s*[,\)])", r'\1', content)
-        content = re.sub(r'(\w)r(?=\s*[,\)\]])', r'\1', content)
+        # # Fix common model errors
+        # agent_call_str = re.sub(r"(\]|'|\")r(?=\s*[,\)])", r'\1', agent_call_str)
+        # agent_call_str = re.sub(r'(\w)r(?=\s*[,\)\]])', r'\1', agent_call_str)
 
-        # Check if it looks like a pythonic tool call
-        if not (content.startswith('[') and content.endswith(']')):
+        if not (agent_call_str.startswith('{') and agent_call_str.endswith('}')):
+            print("No json agent calls found in content.")
             return []
 
         try:
             # Parse as Python AST
-            tree = ast.parse(content, mode='eval')
-            if not isinstance(tree.body, ast.List):
-                return []
+            agent_call = json.loads(agent_call_str)
+            # tree = ast.parse(content, mode='eval')
+            # if not isinstance(tree.body, ast.List):
+            #     return []
 
-            tool_calls = []
-            for idx, call_node in enumerate(tree.body.elts):
-                if not isinstance(call_node, ast.Call):
-                    continue
+            # tool_calls = []
+            # for idx, call_node in enumerate(tree.body.elts):
+            #     if not isinstance(call_node, ast.Call):
+            #         continue
 
-                # Extract function name
-                if isinstance(call_node.func, ast.Name):
-                    func_name = call_node.func.id
-                else:
-                    continue
+            #     # Extract function name
+            #     if isinstance(call_node.func, ast.Name):
+            #         func_name = call_node.func.id
+            #     else:
+            #         continue
 
-                # Extract arguments
-                args_dict = {}
-                for keyword in call_node.keywords:
-                    arg_name = keyword.arg
-                    try:
-                        arg_value = ast.literal_eval(keyword.value)
-                    except (ValueError, TypeError):
-                        if isinstance(keyword.value, ast.Name):
-                            arg_value = keyword.value.id
-                        else:
-                            continue
-                    args_dict[arg_name] = arg_value
+            #     # Extract arguments
+            #     args_dict = {}
+            #     for keyword in call_node.keywords:
+            #         arg_name = keyword.arg
+            #         try:
+            #             arg_value = ast.literal_eval(keyword.value)
+            #         except (ValueError, TypeError):
+            #             if isinstance(keyword.value, ast.Name):
+            #                 arg_value = keyword.value.id
+            #             else:
+            #                 continue
+            #         args_dict[arg_name] = arg_value
 
-                tool_calls.append({
-                    'name': func_name,
-                    'args': args_dict,
-                    'id': f'call_{idx}',
-                    'type': 'tool_call'
-                })
+            #     tool_calls.append({
+            #         'name': func_name,
+            #         'args': args_dict,
+            #         'id': f'call_{idx}',
+            #         'type': 'tool_call'
+            #     })
 
-            return tool_calls
+            return [agent_call]
         except Exception:
             return []
 
@@ -275,20 +279,6 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
         """
         thought_text: str = ""
 
-        # Try to parse pythonic format tool calls (for Gemma 3)
-        if hasattr(response, 'content') and isinstance(response.content, str):
-            # Extract THOUGHT, TOOL_CALL, and remaining text
-            thought, _tool_call, remaining_text = self.extract_tool_calls_and_text(response.content)
-
-            if thought:
-                thought_text = thought
-
-            # Parse tool calls
-            parsed_calls = self._parse_pythonic_tool_calls(response.content)
-            if parsed_calls:
-                response.tool_calls = parsed_calls
-                response.content = remaining_text or ""
-
         # Execute tool calls if present
         if hasattr(response, 'tool_calls') and response.tool_calls:
             tool_results = []
@@ -360,7 +350,7 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
         """
         # Create callback handler only if Langfuse is enabled
         if self.enable_langfuse:
-            self.handler = CallbackHandler(session_id=self.session_id)
+            self.handler = CallbackHandler()
         else:
             self.handler = None
 
@@ -402,7 +392,7 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
         """
         # Create callback handler only if Langfuse is enabled
         if self.enable_langfuse:
-            self.handler = CallbackHandler(session_id=self.session_id)
+            self.handler = CallbackHandler()
         else:
             self.handler = None
 

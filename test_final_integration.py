@@ -25,7 +25,7 @@ print()
 
 # Step 2: Generate dynamic prompt
 print("Step 2: Generating dynamic system prompt...")
-from src.prompts.prompt_builder import build_home_assistant_prompt
+from prompts.system_prompt_builder import build_home_assistant_prompt
 system_prompt = build_home_assistant_prompt(tools)
 print(f"✓ Generated prompt: {len(system_prompt)} characters")
 print()

@@ -5,7 +5,7 @@ langfuse:
   enabled: true
 
   # 디버그 모드 (상세 로그 출력)
-  debug: true
+  debug: false
 
   # 이벤트 버퍼 크기 (이 수만큼 이벤트가 모이면 전송)
   flush_at: 15
