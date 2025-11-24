@@ -22,6 +22,8 @@ class LangfuseConfig:
         self.debug = False
         self.flush_at = 15
         self.flush_interval = 0.5
+        self.timeout = 30  # HTTP request timeout in seconds
+        self.health_check = True  # Check server health before enabling
         self.tags = []
         self.client: Optional[Langfuse] = None
 
@@ -49,6 +51,8 @@ class LangfuseConfig:
                 self.debug = langfuse_config.get('debug', False)
                 self.flush_at = langfuse_config.get('flush_at', 15)
                 self.flush_interval = langfuse_config.get('flush_interval', 0.5)
+                self.timeout = langfuse_config.get('timeout', 30)
+                self.health_check = langfuse_config.get('health_check', True)
                 self.tags = langfuse_config.get('tags', [])
 
                 # Replace environment variable placeholders in tags
@@ -62,6 +66,16 @@ class LangfuseConfig:
 
         if os.getenv('LANGFUSE_DEBUG', '').lower() == 'true':
             self.debug = True
+
+        timeout_env = os.getenv('LANGFUSE_TIMEOUT')
+        if timeout_env:
+            try:
+                self.timeout = int(timeout_env)
+            except ValueError:
+                pass
+
+        if os.getenv('LANGFUSE_HEALTH_CHECK', '').lower() == 'false':
+            self.health_check = False
 
     def _replace_env_vars(self, text: str) -> str:
         """Replace ${VAR_NAME:default} with environment variable value"""
@@ -77,6 +91,27 @@ class LangfuseConfig:
 
         return re.sub(r'\$\{([^}]+)\}', replacer, text)
 
+    def _check_server_health(self, host: str) -> bool:
+        """Check if Langfuse server is reachable"""
+        try:
+            import requests
+            # Quick health check with short timeout
+            response = requests.get(
+                f"{host}/api/public/health",
+                timeout=3,
+                allow_redirects=True
+            )
+            is_healthy = response.status_code == 200
+
+            if self.debug:
+                print(f"Health check: {host}/api/public/health -> {response.status_code}")
+
+            return is_healthy
+        except Exception as e:
+            if self.debug:
+                print(f"Health check failed: {e}")
+            return False
+
     def _initialize_client(self):
         """Initialize Langfuse client"""
         try:
@@ -91,14 +126,35 @@ class LangfuseConfig:
                 self.enabled = False
                 return
 
-            # Initialize client
+            # Perform health check if enabled
+            if self.health_check:
+                if not self._check_server_health(host):
+                    print(f"Warning: Langfuse server at {host} is not reachable, disabling Langfuse")
+                    self.enabled = False
+                    return
+
+            # Initialize client with SDK log level to suppress retries
+            import logging
+            import warnings
+
+            # Suppress OpenTelemetry retry messages to avoid spam when server is down
+            logging.getLogger("opentelemetry.sdk._logs._internal").setLevel(logging.CRITICAL)
+            logging.getLogger("opentelemetry.exporter.otlp").setLevel(logging.CRITICAL)
+            logging.getLogger("opentelemetry.sdk.trace.export").setLevel(logging.CRITICAL)
+            logging.getLogger("opentelemetry.sdk._shared_internal").setLevel(logging.CRITICAL)
+
+            # Suppress urllib3 and requests warnings about retries
+            warnings.filterwarnings("ignore", category=Warning, module="urllib3")
+            warnings.filterwarnings("ignore", category=Warning, module="requests")
+
             self.client = Langfuse(
                 host=host,
                 public_key=public_key,
                 secret_key=secret_key,
                 debug=self.debug,
                 flush_at=self.flush_at,
-                flush_interval=self.flush_interval
+                flush_interval=self.flush_interval,
+                timeout=self.timeout
             )
 
             if self.debug:

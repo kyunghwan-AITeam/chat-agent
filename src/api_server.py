@@ -5,6 +5,7 @@ Implements /v1/chat/completions endpoint compatible with OpenAI API
 import os
 import uuid
 import time
+import logging
 from typing import List, Optional, Dict, Any, Union
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -22,6 +23,11 @@ from mem0 import Memory
 
 # Load environment variables
 load_dotenv()
+
+# Suppress OpenTelemetry error messages when Langfuse server is unavailable
+logging.getLogger("opentelemetry").setLevel(logging.CRITICAL)
+logging.getLogger("opentelemetry.sdk").setLevel(logging.CRITICAL)
+logging.getLogger("opentelemetry.exporter").setLevel(logging.CRITICAL)
 
 
 # Validate required environment variables on startup

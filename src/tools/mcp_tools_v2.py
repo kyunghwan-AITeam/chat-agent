@@ -40,6 +40,10 @@ async def get_mcp_server_instructions_async(
         "web_search": {
             "transport": "streamable_http",
             "url": f"{mcp_base_url}/search/mcp",
+        },
+        "home_assistant": {
+            "transport": "streamable_http",
+            "url": f"http://localhost:23000/mcp",
         }
     }
 
@@ -107,6 +111,10 @@ async def get_mcp_tools_by_server_async(
         "web_search": {
             "transport": "streamable_http",
             "url": f"{mcp_base_url}/search/mcp",
+        },
+        "home_assistant": {
+            "transport": "streamable_http",
+            "url": f"http://localhost:23000/mcp",
         }
     }
 

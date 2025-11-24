@@ -2,6 +2,7 @@
 Main entry point for LangChain Chat Agent (LLM)
 """
 import os
+import logging
 from dotenv import load_dotenv
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
@@ -12,6 +13,11 @@ from mem0 import Memory
 
 # Load environment variables
 load_dotenv()
+
+# Suppress OpenTelemetry error messages when Langfuse server is unavailable
+logging.getLogger("opentelemetry").setLevel(logging.CRITICAL)
+logging.getLogger("opentelemetry.sdk").setLevel(logging.CRITICAL)
+logging.getLogger("opentelemetry.exporter").setLevel(logging.CRITICAL)
 
 config = {
     "vector_store": {

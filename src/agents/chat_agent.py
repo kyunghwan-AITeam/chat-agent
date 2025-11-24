@@ -53,7 +53,7 @@ class ChatAgent:
         self.model = model
         self.temperature = temperature
         self.chat_history: List[Any] = []
-        self.tools = tools or []
+        self.tools = agents or []
         self.use_agent = use_agent and len(self.tools) > 0
         self.session_id = session_id
         self.enable_langfuse = enable_langfuse
@@ -139,9 +139,9 @@ class ChatAgent:
         # agent_call_str = re.sub(r"(\]|'|\")r(?=\s*[,\)])", r'\1', agent_call_str)
         # agent_call_str = re.sub(r'(\w)r(?=\s*[,\)\]])', r'\1', agent_call_str)
 
-        if not (agent_call_str.startswith('{') and agent_call_str.endswith('}')):
-            print("No json agent calls found in content.")
-            return []
+            if not (agent_call_str.startswith('{') and agent_call_str.endswith('}')):
+                print("No json agent calls found in content.")
+                return []
 
         try:
             # Parse as Python AST
@@ -283,8 +283,8 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
         if hasattr(response, 'tool_calls') and response.tool_calls:
             tool_results = []
             for tool_call in response.tool_calls:
-                tool_name = tool_call.get('name')
-                tool_args = tool_call.get('args', {})
+                tool_name = tool_call.get('tool')
+                tool_args = tool_call.get('params', {})
 
                 # Find and execute the tool
                 for tool in self.tools:
