@@ -13,39 +13,5 @@
             },
             "justMyCode": true
         },
-        {
-            "name": "Python: Chat Agent (External Terminal)",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/src/main.py",
-            "console": "externalTerminal",
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/src"
-            },
-            "justMyCode": true
-        },
-        {
-            "name": "Python: Current File",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "justMyCode": true
-        },
-        {
-            "name": "Python: Chat Agent (External Terminal) Server",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/src/api_server.py",
-            "console": "integratedTerminal",
-            "python": "${workspaceFolder}/.venv/bin/python",
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"
-            },
-            "justMyCode": true
-        }
     ]
 }

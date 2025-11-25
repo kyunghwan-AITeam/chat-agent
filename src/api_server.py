@@ -3,6 +3,7 @@ OpenAI-compatible API Server for Chat Agent
 Implements /v1/chat/completions endpoint compatible with OpenAI API
 """
 import os
+import sys
 import uuid
 import time
 import logging
@@ -12,14 +13,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from agents.chat_agent import ChatAgent
-from prompts import HOME_ASSISTANT_PROMPT
+from utils.agent_factory import (
+    load_mcp_tools,
+    load_memory_tools,
+    initialize_langfuse,
+    build_system_prompt_with_tools,
+    create_chat_agent
+)
+from tools.memory_tools import create_memory
 import uvicorn
-import json
 
 from langfuse import get_client, propagate_attributes
-from langfuse.langchain import CallbackHandler
-from mem0 import Memory
-
 
 # Load environment variables
 load_dotenv()
@@ -55,7 +59,6 @@ def validate_environment():
         print("  cp .env.example .env")
         print("\nThen edit .env and set the appropriate values.")
         print("="*60 + "\n")
-        import sys
         sys.exit(1)
 
     # Validate LLM_BASE_URL format
@@ -67,11 +70,9 @@ def validate_environment():
         print(f"\nLLM_BASE_URL must start with http:// or https://")
         print(f"Current value: {base_url}")
         print("="*60 + "\n")
-        import sys
         sys.exit(1)
 
     # Print configuration to stderr (so it's visible even with uvicorn)
-    import sys
     print("\n" + "="*60, file=sys.stderr)
     print("Configuration Loaded", file=sys.stderr)
     print("="*60, file=sys.stderr)
@@ -97,56 +98,19 @@ def validate_environment():
 # Validate environment on module load
 validate_environment()
 
-
-# Initialize Langfuse
-def init_langfuse():
-    """Initialize Langfuse if enabled"""
-    langfuse_enabled = os.getenv('LANGFUSE_ENABLED', 'false').lower() == 'true'
-    if langfuse_enabled:
-        try:
-            from utils.langfuse_config import init_langfuse as init_lf
-            init_lf()
-            return True
-        except Exception as e:
-            print(f"Warning: Could not initialize Langfuse: {e}", file=sys.stderr)
-            return False
-    return False
-
-
 # Initialize Langfuse on module load
-LANGFUSE_ENABLED = init_langfuse()
+LANGFUSE_ENABLED = initialize_langfuse(verbose=True)
 
+# Create shared memory instance
+MEMORY = create_memory()
 
+# FastAPI app
 app = FastAPI(
     title="Chat Agent API",
     description="OpenAI-compatible API for LangChain Chat Agent with LLM",
     version="1.0.0"
 )
 
-config = {
-    # "vector_store": {
-    #     "provider": "qdrant",
-    #     "config": {"host": "localhost", "port": 6333},
-    # },
-    "llm": {
-        "provider": "ollama",
-        "config": {
-            "model": "qwen3:32b",
-            "ollama_base_url": "http://172.168.0.201:11434",
-            "temperature": 0.1
-        },
-    },
-    # "embedder": {
-    #     "provider": "vertexai",
-    #     "config": {"model": "textembedding-gecko@003"},
-    # },
-    # "reranker": {
-    #     "provider": "cohere",
-    #     "config": {"model": "rerank-english-v3.0"},
-    # },
-}
-
-memory = Memory.from_config(config)
 
 # Pydantic models for OpenAI API compatibility
 class Message(BaseModel):
@@ -199,63 +163,50 @@ class ChatCompletionStreamResponse(BaseModel):
     choices: List[ChatCompletionResponseStreamChoice]
 
 
-# Global agent instances (keyed by session)
-# In production, use Redis or similar for session management
-agent_sessions: Dict[str, ChatAgent] = {}
+# Session store now handles chat history persistence
+# No need for global agent_sessions dictionary anymore
 
 
-def get_or_create_agent(session_id: Optional[str] = None, model: Optional[str] = None, temperature: Optional[float] = None) -> tuple[str, ChatAgent]:
-    """Get existing agent or create new one"""
-    if session_id and session_id in agent_sessions:
-        return session_id, agent_sessions[session_id]
-
-    # Create new agent
-    new_session_id = session_id or str(uuid.uuid4())
-
-    # Get configuration from environment (required variables already validated)
-    base_url = os.getenv("LLM_BASE_URL")  # Required, validated on startup
-    default_model = os.getenv("LLM_MODEL")  # Required, validated on startup
-    default_temperature = float(os.getenv("TEMPERATURE", "0.7"))
-
-    # Use provided values or defaults from environment
-    model = model or default_model
-    temperature = temperature if temperature is not None else default_temperature
-
+def create_agent_for_session(session_id: str, model: Optional[str] = None, temperature: Optional[float] = None) -> ChatAgent:
+    """
+    Create a new agent for the session.
+    Chat history is automatically loaded from session store.
+    """
+    # Get MCP configuration
     use_mcp_tools = os.getenv("USE_MCP_TOOLS", "false").lower() == "true"
     mcp_base_url = os.getenv("MCP_BASE_URL", "http://localhost:22001")
     mcp_verify_ssl = os.getenv("MCP_VERIFY_SSL", "false").lower() == "true"
 
-    # Initialize MCP tools if enabled
-    tools = []
+    # Load tools
+    all_tools = []
+    agent_instructions = {}
+
+    # Load MCP tools if enabled
     if use_mcp_tools:
-        try:
-            from tools.mcp_tools import create_all_mcp_tools
-            tools = create_all_mcp_tools(mcp_base_url, mcp_verify_ssl)
-        except Exception as e:
-            print(f"Warning: Could not load MCP tools: {e}")
+        mcp_tools, agent_instructions, _ = load_mcp_tools(
+            mcp_base_url, mcp_verify_ssl, verbose=False
+        )
+        all_tools.extend(mcp_tools)
 
-    # Add memory search tools
-    try:
-        from tools.memory_tools import create_memory_tools
-        memory_tools = create_memory_tools(memory, user_id=new_session_id)
-        tools.extend(memory_tools)
-    except Exception as e:
-        print(f"Warning: Could not load memory tools: {e}")
+    # Load memory tools
+    memory_tools = load_memory_tools(MEMORY, session_id, verbose=False)
+    all_tools.extend(memory_tools)
 
-    agent = ChatAgent(
+    # Build system prompt
+    system_prompt = build_system_prompt_with_tools(agent_instructions, memory_tools)
+
+    # Create agent (chat history automatically loaded from session store)
+    agent = create_chat_agent(
         model=model,
         temperature=temperature,
-        base_url=base_url,
-        api_key="LLM",
-        system_prompt=HOME_ASSISTANT_PROMPT,
-        tools=tools,
-        use_agent=len(tools) > 0,  # Enable agent if any tools are available
+        system_prompt=system_prompt,
+        tools=all_tools,
         enable_langfuse=LANGFUSE_ENABLED,
-        session_id=new_session_id
+        session_id=session_id,
+        verbose=False
     )
 
-    agent_sessions[new_session_id] = agent
-    return new_session_id, agent
+    return agent
 
 
 def convert_messages_to_chat_history(messages: List[Message], agent: ChatAgent):
@@ -332,11 +283,12 @@ async def chat_completions(request: ChatCompletionRequest):
                     session_id = parts[1].strip().split()[0]
                     break
 
-        # Get or create agent
-        session_id, agent = get_or_create_agent(session_id, request.model, request.temperature)
+        # Generate session ID if not provided
+        if not session_id:
+            session_id = str(uuid.uuid4())
 
-        # Convert messages to chat history
-        convert_messages_to_chat_history(request.messages, agent)
+        # Create agent for session (chat history automatically loaded)
+        agent = create_agent_for_session(session_id, request.model, request.temperature)
 
         # Get the last user message
         user_message = request.messages[-1].content if request.messages else ""
@@ -359,18 +311,21 @@ async def chat_completions(request: ChatCompletionRequest):
 
                         # Store user message in memory
                         try:
-                            memory.add([{"role": "user", "content": user_message}], user_id=session_id)
+                            MEMORY.add([{"role": "user", "content": user_message}], user_id=session_id)
                         except Exception as e:
                             print(f"Warning: Could not save user message to memory: {e}")
 
-                        for chunk_text in agent.chat_stream(user_message):
+                        # Get model name with fallback
+                        model_name = request.model or os.getenv("LLM_MODEL", "unknown")
+
+                        async for chunk_text in agent.chat_stream(user_message):
                             full_content += chunk_text
                             if first_chunk:
                                 # First chunk with role
                                 chunk = ChatCompletionStreamResponse(
                                     id=completion_id,
                                     created=created_time,
-                                    model=request.model,
+                                    model=model_name,
                                     choices=[
                                         ChatCompletionResponseStreamChoice(
                                             index=0,
@@ -385,7 +340,7 @@ async def chat_completions(request: ChatCompletionRequest):
                                 chunk = ChatCompletionStreamResponse(
                                     id=completion_id,
                                     created=created_time,
-                                    model=request.model,
+                                    model=model_name,
                                     choices=[
                                         ChatCompletionResponseStreamChoice(
                                             index=0,
@@ -399,7 +354,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
                         # Store assistant response in memory
                         try:
-                            memory.add([{"role": "assistant", "content": full_content}], user_id=session_id)
+                            MEMORY.add([{"role": "assistant", "content": full_content}], user_id=session_id)
                         except Exception as e:
                             print(f"Warning: Could not save assistant response to memory: {e}")
 
@@ -407,7 +362,7 @@ async def chat_completions(request: ChatCompletionRequest):
                         final_chunk = ChatCompletionStreamResponse(
                             id=completion_id,
                             created=created_time,
-                            model=request.model,
+                            model=model_name,
                             choices=[
                                 ChatCompletionResponseStreamChoice(
                                     index=0,
@@ -432,22 +387,25 @@ async def chat_completions(request: ChatCompletionRequest):
                     # Non-streaming response
                     # Store user message in memory
                     try:
-                        memory.add([{"role": "user", "content": user_message}], user_id=session_id)
+                        MEMORY.add([{"role": "user", "content": user_message}], user_id=session_id)
                     except Exception as e:
                         print(f"Warning: Could not save user message to memory: {e}")
 
-                    response_text = agent.chat(user_message)
+                    response_text = await agent.chat(user_message)
 
                     # Store assistant response in memory
                     try:
-                        memory.add([{"role": "assistant", "content": response_text}], user_id=session_id)
+                        MEMORY.add([{"role": "assistant", "content": response_text}], user_id=session_id)
                     except Exception as e:
                         print(f"Warning: Could not save assistant response to memory: {e}")
+
+                    # Get model name with fallback
+                    model_name = request.model or os.getenv("LLM_MODEL", "unknown")
 
                     response = ChatCompletionResponse(
                         id=completion_id,
                         created=created_time,
-                        model=request.model,
+                        model=model_name,
                         choices=[
                             ChatCompletionResponseChoice(
                                 index=0,
@@ -471,8 +429,10 @@ async def chat_completions(request: ChatCompletionRequest):
 @app.delete("/v1/sessions/{session_id}")
 async def delete_session(session_id: str):
     """Delete a session and its chat history"""
-    if session_id in agent_sessions:
-        del agent_sessions[session_id]
+    from utils.session_store import session_store
+
+    success = session_store.delete_session(session_id)
+    if success:
         return {"message": f"Session {session_id} deleted"}
     else:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -481,17 +441,39 @@ async def delete_session(session_id: str):
 @app.post("/v1/sessions/{session_id}/reset")
 async def reset_session(session_id: str):
     """Reset chat history for a session"""
-    if session_id in agent_sessions:
-        agent_sessions[session_id].reset_memory()
+    from utils.session_store import session_store
+
+    try:
+        history = session_store.get_history(session_id)
+        history.clear()
         return {"message": f"Session {session_id} reset"}
-    else:
-        raise HTTPException(status_code=404, detail="Session not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to reset session: {str(e)}")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Background task to cleanup expired sessions"""
+    import asyncio
+    from utils.session_store import session_store
+
+    async def cleanup_loop():
+        while True:
+            await asyncio.sleep(300)  # Check every 5 minutes
+            cleaned = session_store.cleanup_expired_sessions()
+            if cleaned > 0:
+                print(f"[Background] Cleaned up {cleaned} expired sessions")
+
+    # Only run cleanup for memory-based storage
+    if session_store.store_type == "memory":
+        asyncio.create_task(cleanup_loop())
+        print("[Background] Session cleanup task started (5 minute interval)")
 
 
 def main():
     """Run the API server"""
     host = os.getenv("API_HOST", "0.0.0.0")
-    port = int(os.getenv("API_PORT", "23000"))
+    port = int(os.getenv("API_PORT", "21000"))
 
     print(f"\n{'='*60}")
     print(f"Chat Agent API Server")

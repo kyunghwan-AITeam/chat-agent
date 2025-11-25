@@ -5,6 +5,44 @@ Allows searching through conversation history and memories.
 from typing import List, Optional, Any
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+from mem0 import Memory
+
+
+# Memory configuration
+def get_memory_config() -> dict:
+    """Get Memory configuration for mem0"""
+    return {
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "collection_name": "chat_memories",
+                "embedding_model_dims": 1536,
+                "on_disk": True,
+                "path": "/tmp/qdrant_mem0"
+            },
+        },
+        "llm": {
+            "provider": "openai",
+            "config": {
+                "model": "gpt-4.1-nano-2025-04-14",
+                "temperature": 0.2,
+                "max_tokens": 2000,
+            }
+        },
+        "embedder": {
+            "provider": "openai",
+            "config": {
+                "model": "text-embedding-3-large",
+                "embedding_dims": 1536,
+            }
+        },
+    }
+
+
+def create_memory() -> Memory:
+    """Create Memory instance with default configuration"""
+    config = get_memory_config()
+    return Memory.from_config(config)
 
 
 class MemorySearchInput(BaseModel):

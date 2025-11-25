@@ -8,10 +8,12 @@ import json
 from typing import List, Dict, Any, Optional, Tuple
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 
 from langfuse import get_client, propagate_attributes
 from langfuse.langchain import CallbackHandler
+
+from utils import JsonFixer
 
 class ChatAgent:
     """LangChain 기반 대화형 AI Agent (Ollama 연동)"""
@@ -40,7 +42,7 @@ class ChatAgent:
             tools: List of LangChain tools to use (default: None)
             use_agent: Whether to use agent with tools (default: False)
             enable_langfuse: Whether to enable Langfuse tracing (default: False)
-            session_id: Session ID for Langfuse tracing (default: None)
+            session_id: Session ID for session history management (default: None)
         """
         # Initialize LLM
         self.llm = ChatOpenAI(
@@ -52,7 +54,6 @@ class ChatAgent:
 
         self.model = model
         self.temperature = temperature
-        self.chat_history: List[Any] = []
         self.tools = agents or []
         self.use_agent = use_agent and len(self.tools) > 0
         self.session_id = session_id
@@ -74,6 +75,12 @@ class ChatAgent:
 
         # Create chain
         self.chain = self.prompt | self.llm
+
+        # Load chat history from session store if session_id is provided
+        if self.session_id:
+            self.chat_history = self._load_chat_history()
+        else:
+            self.chat_history: List[Any] = []
 
     @staticmethod
     def extract_tool_calls_and_text(content: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -134,15 +141,6 @@ class ChatAgent:
         if agent_call_match:
             agent_call_str = agent_call_match.group(1).strip()
 
-        # # Remove markdown code blocks
-        # agent_call_str = re.sub(r'```(?:tool_code|python)?\s*\n', '', agent_call_str)
-        # agent_call_str = re.sub(r'\n?```\s*$', '', agent_call_str)
-        # agent_call_str = agent_call_str.strip()
-
-        # # Fix common model errors
-        # agent_call_str = re.sub(r"(\]|'|\")r(?=\s*[,\)])", r'\1', agent_call_str)
-        # agent_call_str = re.sub(r'(\w)r(?=\s*[,\)\]])', r'\1', agent_call_str)
-
             if not (agent_call_str.startswith('{') and agent_call_str.endswith('}')):
                 print("No json agent calls found in content.")
                 return []
@@ -150,84 +148,15 @@ class ChatAgent:
         # Try parsing JSON with LLM correction on failure
         for attempt in range(max_retries + 1):
             try:
-                # Parse as JSON
                 agent_call = json.loads(agent_call_str)
-                # tree = ast.parse(content, mode='eval')
-                # if not isinstance(tree.body, ast.List):
-                #     return []
-
-                # tool_calls = []
-                # for idx, call_node in enumerate(tree.body.elts):
-                #     if not isinstance(call_node, ast.Call):
-                #         continue
-
-                #     # Extract function name
-                #     if isinstance(call_node.func, ast.Name):
-                #         func_name = call_node.func.id
-                #     else:
-                #         continue
-
-                #     # Extract arguments
-                #     args_dict = {}
-                #     for keyword in call_node.keywords:
-                #         arg_name = keyword.arg
-                #         try:
-                #             arg_value = ast.literal_eval(keyword.value)
-                #         except (ValueError, TypeError):
-                #             if isinstance(keyword.value, ast.Name):
-                #                 arg_value = keyword.value.id
-                #             else:
-                #                 continue
-                #         args_dict[arg_name] = arg_value
-
-                #     tool_calls.append({
-                #         'name': func_name,
-                #         'args': args_dict,
-                #         'id': f'call_{idx}',
-                #         'type': 'tool_call'
-                #     })
-
                 return [agent_call]
             except json.JSONDecodeError as e:
-                if attempt < max_retries:
-                    # Ask LLM to fix the JSON
-                    print(f"\nJSON parsing failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
-                    print(f"Asking LLM to correct the JSON format...")
-
-                    correction_prompt = f"""
-/no_think                    
-The following JSON in <AGENT_CALL> tag has syntax errors:
-
-<AGENT_CALL>
-{agent_call_str}
-</AGENT_CALL>
-
-Error: {str(e)}
-
-Please fix the JSON syntax errors and return ONLY the corrected JSON inside <AGENT_CALL> tags. Do not include any explanations.
-The JSON should be valid and properly formatted."""
-
-                    try:
-                        correction_response = self.llm.invoke(
-                            correction_prompt,
-                            config={"callbacks": [self.handler]} if self.handler else {}
-                        )
-                        corrected_content = str(correction_response.content) if hasattr(correction_response, 'content') else str(correction_response)
-
-                        # Extract corrected JSON from response
-                        corrected_match = re.search(r'<AGENT_CALL>\s*(.*?)\s*</AGENT_CALL>', corrected_content, re.DOTALL)
-                        if corrected_match:
-                            agent_call_str = corrected_match.group(1).strip()
-                            print(f"LLM corrected JSON:\n{agent_call_str}")
-                        else:
-                            print("LLM failed to return corrected JSON in proper format")
-                            break
-                    except Exception as llm_error:
-                        print(f"LLM correction failed: {str(llm_error)}")
-                        break
-                else:
-                    print(f"\nFailed to parse JSON after {max_retries} correction attempts")
-                    return []
+                agent_call_str = JsonFixer.fix_json_with_llm(
+                    invalid_json=agent_call_str,
+                    error_message=str(e),
+                    max_retries=2
+                )
+                attempt += 1
             except Exception as e:
                 print(f"Unexpected error parsing tool calls: {str(e)}")
                 return []
@@ -268,20 +197,43 @@ The JSON should be valid and properly formatted."""
                 tool_name = tool_call.get('name')
                 tool_args = tool_call.get('args', {})
 
-                # Find and execute the tool
+                # Find the tool by name
+                tool_found = False
                 for tool in self.tools:
                     if tool.name == tool_name:
+                        tool_found = True
                         try:
+                            # Invoke the tool with proper error handling
+                            # Use synchronous invoke() to avoid event loop conflicts
                             result = tool.invoke(tool_args)
                             tool_results.append(f"Tool: {tool_name}\nArguments: {tool_args}\nResult: {result}")
                         except Exception as e:
-                            tool_results.append(f"Tool: {tool_name}\nArguments: {tool_args}\nError: {str(e)}")
+                            # Detailed error logging
+                            error_msg = f"Tool: {tool_name}\nArguments: {tool_args}\nError: {str(e)}"
+                            tool_results.append(error_msg)
+                            import traceback
+                            print(f"\n=== Tool Invocation Error ===")
+                            print(f"Tool: {tool_name}")
+                            print(f"Arguments: {tool_args}")
+                            print(f"Error: {str(e)}")
+                            traceback.print_exc()
+                            print("=" * 30 + "\n")
                         break
 
+                # Handle tool not found case
+                if not tool_found:
+                    error_msg = f"Tool: {tool_name}\nError: Tool not found in available tools"
+                    tool_results.append(error_msg)
+                    print(f"\n=== Tool Not Found ===")
+                    print(f"Requested tool: {tool_name}")
+                    print(f"Available tools: {[t.name for t in self.tools]}")
+                    print("=" * 30 + "\n")
+
             if tool_results:
-                # Ask LLM to interpret the tool results
-                tool_context = "\n\n".join(tool_results)
-                interpretation_prompt = f"""The user asked: "{original_message}"
+                try:
+                    # Ask LLM to interpret the tool results
+                    tool_context = "\n\n".join(tool_results)
+                    interpretation_prompt = f"""The user asked: "{original_message}"
 
 You called some tools and got these results:
 
@@ -295,16 +247,141 @@ When creating your response:
 
 Provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
 
-                interpretation_response = self.llm.invoke(
-                    interpretation_prompt,
-                    config={"callbacks": [self.handler]} if self.handler else {}
-                )
-                final_response = str(interpretation_response.content) if hasattr(interpretation_response, 'content') else str(interpretation_response)
+                    interpretation_response = self.llm.invoke(
+                        interpretation_prompt,
+                        config={"callbacks": [self.handler]} if self.handler else {}
+                    )
+                    final_response = str(interpretation_response.content) if hasattr(interpretation_response, 'content') else str(interpretation_response)
 
-                # Prepend thought if it existed
-                if thought_text:
-                    return f"{thought_text}\n\n{final_response}"
-                return final_response
+                    # Prepend thought if it existed
+                    if thought_text:
+                        return f"{thought_text}\n\n{final_response}"
+                    return final_response
+                except Exception as e:
+                    # Handle LLM interpretation errors
+                    error_msg = f"LLM 해석 중 오류 발생: {str(e)}"
+                    import traceback
+                    print(f"\n=== LLM Interpretation Error ===")
+                    print(f"Error: {str(e)}")
+                    traceback.print_exc()
+                    print("=" * 30 + "\n")
+                    if thought_text:
+                        return f"{thought_text}\n\n{error_msg}"
+                    return error_msg
+
+        # Return content if no tool calls (remove tags if present)
+        if hasattr(response, 'content'):
+            content = str(response.content)
+            _thought, _tool_call, remaining_text = self.extract_tool_calls_and_text(content)
+            if remaining_text:
+                return remaining_text
+            return content
+        return str(response)
+
+    async def _handle_tool_calls_async(self, response: Any, original_message: str = "") -> str:
+        """
+        Handle tool calls from LLM response and get LLM to interpret the results (async).
+
+        Args:
+            response: Response from LLM
+            original_message: Original user message for context
+
+        Returns:
+            Final response text after executing tools and LLM interpretation
+        """
+        thought_text: str = ""
+
+        # Try to parse pythonic format tool calls (for Gemma 3)
+        if hasattr(response, 'content') and isinstance(response.content, str):
+            # Extract THOUGHT, TOOL_CALL, and remaining text
+            thought, _tool_call, remaining_text = self.extract_tool_calls_and_text(response.content)
+
+            if thought:
+                thought_text = thought
+
+            # Parse tool calls
+            parsed_calls = self._parse_pythonic_tool_calls(response.content)
+            if parsed_calls:
+                response.tool_calls = parsed_calls
+                response.content = remaining_text or ""
+
+        # Execute tool calls if present
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            tool_results = []
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.get('name')
+                tool_args = tool_call.get('args', {})
+
+                # Find the tool by name
+                tool_found = False
+                for tool in self.tools:
+                    if tool.name == tool_name:
+                        tool_found = True
+                        try:
+                            # Invoke the tool asynchronously
+                            result = await tool.ainvoke(tool_args)
+                            tool_results.append(f"Tool: {tool_name}\nArguments: {tool_args}\nResult: {result}")
+                        except Exception as e:
+                            # Detailed error logging
+                            error_msg = f"Tool: {tool_name}\nArguments: {tool_args}\nError: {str(e)}"
+                            tool_results.append(error_msg)
+                            import traceback
+                            print(f"\n=== Tool Invocation Error ===")
+                            print(f"Tool: {tool_name}")
+                            print(f"Arguments: {tool_args}")
+                            print(f"Error: {str(e)}")
+                            traceback.print_exc()
+                            print("=" * 30 + "\n")
+                        break
+
+                # Handle tool not found case
+                if not tool_found:
+                    error_msg = f"Tool: {tool_name}\nError: Tool not found in available tools"
+                    tool_results.append(error_msg)
+                    print(f"\n=== Tool Not Found ===")
+                    print(f"Requested tool: {tool_name}")
+                    print(f"Available tools: {[t.name for t in self.tools]}")
+                    print("=" * 30 + "\n")
+
+            if tool_results:
+                try:
+                    # Ask LLM to interpret the tool results (async)
+                    tool_context = "\n\n".join(tool_results)
+                    interpretation_prompt = f"""The user asked: "{original_message}"
+
+You called some tools and got these results:
+
+{tool_context}
+
+IMPORTANT: The tool results may contain mixed Korean/English text (e.g., "Name is 김철수").
+When creating your response:
+1. Translate any English phrases to Korean naturally
+2. Rephrase the information in a conversational Korean style
+3. Example: "Name is 김철수" → "이름은 김철수입니다"
+
+Provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
+
+                    interpretation_response = await self.llm.ainvoke(
+                        interpretation_prompt,
+                        config={"callbacks": [self.handler]} if self.handler else {}
+                    )
+                    final_response = str(interpretation_response.content) if hasattr(interpretation_response, 'content') else str(interpretation_response)
+
+                    # Prepend thought if it existed
+                    if thought_text:
+                        return f"{thought_text}\n\n{final_response}"
+                    return final_response
+                except Exception as e:
+                    # Handle LLM interpretation errors
+                    error_msg = f"LLM 해석 중 오류 발생: {str(e)}"
+                    import traceback
+                    print(f"\n=== LLM Interpretation Error ===")
+                    print(f"Error: {str(e)}")
+                    traceback.print_exc()
+                    print("=" * 30 + "\n")
+                    if thought_text:
+                        return f"{thought_text}\n\n{error_msg}"
+                    return error_msg
 
         # Return content if no tool calls (remove tags if present)
         if hasattr(response, 'content'):
@@ -387,9 +464,9 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
             else:
                 yield content
 
-    def chat(self, message: str) -> str:
+    async def chat(self, message: str) -> str:
         """
-        Send a message to the agent and get a response (non-streaming)
+        Send a message to the agent and get a response (non-streaming, async)
 
         Args:
             message: User's message
@@ -407,15 +484,15 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
             # Pass handler to the chain invocation only if enabled
             config = {"callbacks": [self.handler]} if self.handler else {}
 
-            # Invoke chain with message and history
-            response = self.chain.invoke({
+            # Invoke chain with message and history (async)
+            response = await self.chain.ainvoke({
                 "input": message,
                 "chat_history": self.chat_history},
                 config=config)
 
             # Handle tool calls if present
             if self.use_agent:
-                response_text = self._handle_tool_calls(response, message)
+                response_text = await self._handle_tool_calls_async(response, message)
             else:
                 response_text = str(response.content)
 
@@ -423,15 +500,18 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
             self.chat_history.append(HumanMessage(content=message))
             self.chat_history.append(AIMessage(content=response_text))
 
+            # Save chat history to session store
+            self._save_chat_history()
+
             return response_text
         except Exception as e:
             import traceback
             traceback.print_exc()
             return f"오류가 발생했습니다: {str(e)}"
 
-    def chat_stream(self, message: str):
+    async def chat_stream(self, message: str):
         """
-        Send a message to the agent and stream the response
+        Send a message to the agent and stream the response (async)
 
         Args:
             message: User's message
@@ -452,8 +532,8 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
             # Pass handler to the chain streaming only if enabled
             config = {"callbacks": [self.handler]} if self.handler else {}
 
-            # Stream the response
-            for chunk in self.chain.stream({
+            # Stream the response (async)
+            async for chunk in self.chain.astream({
                 "input": message,
                 "chat_history": self.chat_history},
                 config=config
@@ -474,38 +554,143 @@ Provide a natural, conversational response to the user in Korean. Don't mention 
                         response_obj.tool_calls = parsed_calls
                         response_obj.content = full_response
 
-                # Execute tool calls and stream interpretation
+                # Execute tool calls and stream interpretation ONLY if tool calls exist
                 if hasattr(response_obj, 'tool_calls') and response_obj.tool_calls:
                     yield "\n\n"
-                    # Run async generator in sync context
-                    import asyncio
-                    try:
-                        loop = asyncio.get_event_loop()
-                    except RuntimeError:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
 
-                    async_gen = self._handle_tool_calls_streaming(response_obj, message)
-                    while True:
+                    # Stream tool execution results
+                    tool_results = []
+                    for tool_call in response_obj.tool_calls:
+                        tool_name = tool_call.get('tool')
+                        tool_args = tool_call.get('params', {})
+                        if "user_id" in tool_args:
+                            tool_args["user_id"] = self.session_id
+                        # Find the tool by name
+                        tool_found = False
+                        for tool in self.tools:
+                            if tool.name == tool_name:
+                                tool_found = True
+                                try:
+                                    # Invoke the tool asynchronously
+                                    result = await tool.ainvoke(tool_args)
+                                    tool_results.append(f"Tool: {tool_name}\nArguments: {tool_args}\nResult: {result}")
+                                    print(f"[Tool executed: {tool_name}] {result}\n")
+                                except Exception as e:
+                                    # Detailed error logging
+                                    error_msg = f"Tool: {tool_name}\nArguments: {tool_args}\nError: {str(e)}"
+                                    tool_results.append(error_msg)
+                                    yield f"[Tool execution failed: {tool_name} - {str(e)}]\n"
+                                    import traceback
+                                    print(f"\n=== Tool Invocation Error ===")
+                                    print(f"Tool: {tool_name}")
+                                    print(f"Arguments: {tool_args}")
+                                    print(f"Error: {str(e)}")
+                                    traceback.print_exc()
+                                    print("=" * 30 + "\n")
+                                break
+
+                        # Handle tool not found case
+                        if not tool_found:
+                            error_msg = f"Tool: {tool_name}\nError: Tool not found in available tools"
+                            tool_results.append(error_msg)
+                            yield f"[Tool not found: {tool_name}]\n"
+                            print(f"\n=== Tool Not Found ===")
+                            print(f"Requested tool: {tool_name}")
+                            print(f"Available tools: {[t.name for t in self.tools]}")
+                            print("=" * 30 + "\n")
+
+                    if tool_results:
                         try:
-                            chunk = loop.run_until_complete(async_gen.__anext__())
-                            full_response += chunk
-                            yield chunk
-                        except StopAsyncIteration:
-                            break
+                            # Ask LLM to interpret the tool results and stream response
+                            tool_context = "\n\n".join(tool_results)
+                            interpretation_prompt = f"""The user asked: "{message}"
+
+You called some tools and got these results:
+
+{tool_context}
+
+IMPORTANT: The tool results may contain mixed Korean/English text (e.g., "Name is 김철수").
+When creating your response:
+1. Translate any English phrases to Korean naturally
+2. Rephrase the information in a conversational Korean style
+3. Example: "Name is 김철수" → "이름은 김철수입니다"
+
+Provide a natural, conversational response to the user in Korean. Don't mention that you used tools - just provide the information naturally."""
+
+                            # Stream LLM interpretation (async)
+                            config = {"callbacks": [self.handler]} if self.handler else {}
+                            async for chunk in self.chain.astream({
+                                "input": interpretation_prompt,
+                                "chat_history": []  # Don't include history for interpretation
+                            }, config=config):
+                                if hasattr(chunk, 'content'):
+                                    content = str(chunk.content)
+                                    if content:
+                                        full_response += content
+                                        yield content
+                        except Exception as e:
+                            # Handle LLM interpretation errors
+                            error_msg = f"\n[LLM 해석 중 오류 발생: {str(e)}]"
+                            full_response += error_msg
+                            yield error_msg
+                            import traceback
+                            print(f"\n=== LLM Interpretation Error ===")
+                            print(f"Error: {str(e)}")
+                            traceback.print_exc()
+                            print("=" * 30 + "\n")
 
             # Update chat history after streaming is complete
             self.chat_history.append(HumanMessage(content=message))
             self.chat_history.append(AIMessage(content=full_response))
+
+            # Save chat history to session store
+            self._save_chat_history()
 
         except Exception as e:
             import traceback
             traceback.print_exc()
             yield f"\n오류가 발생했습니다: {str(e)}"
 
+    def _load_chat_history(self) -> List[Any]:
+        """Load chat history from session store"""
+        if not self.session_id:
+            return []
+
+        try:
+            from utils.session_store import session_store
+            history = session_store.get_history(self.session_id)
+            messages = history.messages
+            print(f"[ChatAgent] Loaded {len(messages)} messages for session: {self.session_id}")
+            return list(messages)
+        except Exception as e:
+            print(f"[ChatAgent] Failed to load chat history: {e}")
+            return []
+
+    def _save_chat_history(self):
+        """Save chat history to session store"""
+        if not self.session_id:
+            return
+
+        try:
+            from utils.session_store import session_store
+            history = session_store.get_history(self.session_id)
+
+            # Clear existing and add all messages
+            history.clear()
+            for msg in self.chat_history:
+                history.add_message(msg)
+
+            print(f"[ChatAgent] Saved {len(self.chat_history)} messages for session: {self.session_id}")
+        except Exception as e:
+            print(f"[ChatAgent] Failed to save chat history: {e}")
+
     def reset_memory(self):
         """Reset conversation history"""
         self.chat_history.clear()
+
+        # Also clear from session store
+        if self.session_id:
+            self._save_chat_history()
 
     def get_system_prompt(self) -> str:
         """Get the current system prompt for debugging"""

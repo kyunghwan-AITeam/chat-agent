@@ -70,7 +70,9 @@ async def get_mcp_server_instructions_async(
                         if init_result.instructions:
                             instructions[server_name] = init_result.instructions
             except Exception as e:
-                print(f"Warning: Could not get instructions from {server_name}: {e}")
+                # Suppress expected errors from session cleanup
+                if "ClosedResourceError" not in str(e):
+                    print(f"Warning: Could not get instructions from {server_name}: {e}")
                 continue
 
         return instructions

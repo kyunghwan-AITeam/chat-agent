@@ -26,6 +26,10 @@ wheels/
 # Environment variables
 .env
 
+# Session files
+.cli_session_id
+.sessions/
+
 # IDE
 # .vscode/ - Keep VSCode settings for team consistency
 .idea/

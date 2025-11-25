@@ -33,7 +33,7 @@ def build_home_assistant_prompt(
 {{
     "agent": server_name,
     "tool": tool_name,
-    "params": {{"param1": "value1", "param2": "value2"}},
+    "params": {{"param1": "value1", "param2": "value2"}}
 }}
 </AGENT_CALL>
 ```
@@ -52,7 +52,7 @@ def build_home_assistant_prompt(
 {{
     "agent": "weather",
     "tool": "get_weather",
-    "params": {{"location": "Seoul"}},
+    "params": {{"location": "Seoul"}}
 }}
 </AGENT_CALL>
 
