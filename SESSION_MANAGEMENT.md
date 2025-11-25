@@ -1,405 +1,460 @@
 # Session Management
 
-세션 기반 대화 히스토리 관리 시스템입니다.
+세션 기반 인증 및 대화 히스토리 관리 시스템입니다.
 
 ## 개요
 
-각 사용자의 대화 컨텍스트를 세션 ID로 구분하여 관리합니다. 메모리 기반(단일 워커)과 Redis 기반(멀티 워커) 두 가지 방식을 지원합니다.
+Home Assistant 시스템을 위한 세션 관리로, 다음을 통합 관리합니다:
+- **세션 인증**: API 서버에서 발급 및 관리
+- **WebSocket 연결**: 클라이언트와 Home Assistant 간 통신
+- **대화 히스토리**: 메모리 또는 Redis 기반 저장
 
 ## 아키텍처
 
 ```
-┌─────────────────────────────────────────┐
-│  API Request (with session_id)          │
-└──────────────┬──────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────────┐
-│  api_server.py                           │
-│  - Extract session_id                    │
-│  - Create ChatAgent for session          │
-└──────────────┬───────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────────┐
-│  ChatAgent                               │
-│  - Load chat_history from SessionStore   │
-│  - Process user message                  │
-│  - Save chat_history to SessionStore     │
-└──────────────┬───────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────────┐
-│  SessionStore                            │
-│  ┌────────────┐  ┌──────────────────┐   │
-│  │  Memory    │  │  Redis           │   │
-│  │  (worker=1)│  │  (multi-worker)  │   │
-│  └────────────┘  └──────────────────┘   │
-└──────────────────────────────────────────┘
+Client
+  │
+  ├─1─→ API Server: POST /v1/sessions
+  │     └─→ session_id 발급
+  │
+  ├─2─→ WebSocket Server: ws://.../ws/{session_id}
+  │     └─→ 연결 등록
+  │
+  └─3─→ API Server: POST /v1/chat/completions (X-Session-ID: ...)
+        ├─→ 세션 인증 확인
+        ├─→ WebSocket 연결 확인
+        ├─→ Chat 처리
+        └─→ Home Assistant MCP → WebSocket → Client
+```
+
+### 상세 플로우
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Client                                                  │
+└───────┬─────────────────────────────────────────────────┘
+        │
+        │ 1. POST /v1/sessions
+        ▼
+┌─────────────────────────────────────────────────────────┐
+│  API Server (chat-agent)                                │
+│  - 세션 ID 발급 (UUID)                                   │
+│  - AUTHORIZED_SESSIONS에 저장                            │
+│  - TTL 설정 (기본 30분)                                  │
+└───────┬─────────────────────────────────────────────────┘
+        │
+        │ {"session_id": "abc-123", ...}
+        ▼
+┌─────────────────────────────────────────────────────────┐
+│  Client                                                  │
+│  - session_id 수신                                       │
+└───────┬─────────────────────────────────────────────────┘
+        │
+        │ 2. WebSocket 접속: ws://.../ws/abc-123
+        ▼
+┌─────────────────────────────────────────────────────────┐
+│  WebSocket Server (ai-voice-home-assistant)             │
+│  - connections["abc-123"] = websocket                   │
+│  - 연결 상태 유지                                         │
+└───────┬─────────────────────────────────────────────────┘
+        │
+        │ 3. POST /v1/chat/completions (X-Session-ID: abc-123)
+        ▼
+┌─────────────────────────────────────────────────────────┐
+│  API Server (chat-agent)                                │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │ 검증 단계:                                          │  │
+│  │ 1. X-Session-ID 헤더 존재?                         │  │
+│  │ 2. AUTHORIZED_SESSIONS에 존재?                     │  │
+│  │ 3. 만료되지 않음?                                   │  │
+│  │ 4. WebSocket 연결됨? (HTTP 확인)                   │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                          │
+│  모두 통과 → Chat 처리                                   │
+│  ├─→ ChatAgent 생성 (대화 히스토리 자동 로드)            │
+│  ├─→ LLM 응답 생성                                       │
+│  └─→ Home Assistant MCP 툴 호출 시                       │
+│       └─→ WebSocket Server로 요청 전달                   │
+│            └─→ Client로 프록시                           │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ## 주요 구성 요소
 
-### 1. SessionStore (`src/utils/session_store.py`)
+### 1. API Server (`src/api_server.py`)
 
-세션 히스토리를 저장/로드하는 추상 레이어입니다.
+**세션 인증 관리:**
+- `AUTHORIZED_SESSIONS`: 발급된 세션 정보 저장 (메모리)
+- 세션 생성, 검증, 만료 처리
+- WebSocket 서버와 HTTP 통신
 
-**지원하는 저장소 타입:**
-- `memory`: 인메모리 저장 (단일 워커 전용)
-- `redis`: Redis 기반 저장 (멀티 워커 지원)
+**주요 엔드포인트:**
+- `POST /v1/sessions` - 세션 생성
+- `GET /v1/sessions/{session_id}` - 세션 정보 조회
+- `DELETE /v1/sessions/{session_id}` - 세션 삭제
+- `POST /v1/sessions/{session_id}/reset` - 대화 히스토리만 초기화
+- `POST /v1/chat/completions` - Chat API (세션 검증 필수)
 
-**주요 기능:**
-- `get_history(session_id)`: 세션 히스토리 가져오기
-- `delete_session(session_id)`: 세션 삭제
-- `cleanup_expired_sessions()`: 만료된 세션 정리 (memory 모드만)
+### 2. WebSocket Server (`~/Projects/ai-voice-home-assistant/websocket_server`)
 
-### 2. ChatAgent (`src/agents/chat_agent.py`)
+**연결 관리:**
+- `connections`: session_id → WebSocket 매핑
+- 실시간 연결 상태 관리 (연결 해제 시 즉시 삭제)
 
-대화 에이전트가 자동으로 세션 히스토리를 관리합니다.
+**API 엔드포인트:**
+- `GET /api/sessions/{session_id}/status` - 연결 상태 확인
+- `DELETE /api/sessions/{session_id}` - 강제 연결 해제
+- `POST /api/send-request` - Home Assistant → Client 요청 프록시
 
-**세션 관리 메서드:**
-- `_load_chat_history()`: 초기화 시 자동 로드
-- `_save_chat_history()`: 대화 후 자동 저장
-- `reset_memory()`: 세션 히스토리 초기화
+### 3. SessionStore (`src/utils/session_store.py`)
 
-### 3. API Server (`src/api_server.py`)
+**대화 히스토리 저장:**
+- `memory`: 인메모리 저장 (단일 워커)
+- `redis`: Redis 기반 저장 (멀티 워커)
 
-매 요청마다 새로운 ChatAgent를 생성하지만, 세션 히스토리는 자동으로 복원됩니다.
+### 4. ChatAgent (`src/agents/chat_agent.py`)
 
-**변경 사항:**
-- ❌ 제거: `agent_sessions` 전역 딕셔너리
-- ✅ 추가: `create_agent_for_session()` - 세션별 에이전트 생성
-- ✅ 추가: 백그라운드 정리 작업 (5분 간격)
+**자동 히스토리 관리:**
+- 초기화 시 SessionStore에서 로드
+- 대화 후 자동 저장
 
 ## 설정 (.env)
 
 ```bash
-# 세션 저장소 타입 (memory | redis)
-SESSION_STORE_TYPE=memory
+# API Server
+API_HOST=0.0.0.0
+API_PORT=23000
 
-# 세션 TTL - 초 단위 (기본값: 1800초 = 30분)
-SESSION_TTL_SECONDS=1800
+# WebSocket Server URL (세션 검증용)
+WEBSOCKET_SERVER_URL=http://localhost:21000
 
-# Redis URL (redis 모드일 때 사용)
+# Session Store
+SESSION_STORE_TYPE=memory  # memory | redis
+SESSION_TTL_SECONDS=1800   # 30분
+
+# Redis (redis 모드일 때)
 REDIS_URL=redis://localhost:6379/0
 ```
 
 ## 사용 방법
 
-### 메모리 기반 (기본값)
+### 1. 서버 실행
 
-**장점:**
-- 추가 인프라 불필요
-- 빠른 성능
-- 간단한 설정
-
-**제한 사항:**
-- 단일 워커만 지원 (`--workers 1`)
-- 서버 재시작 시 세션 손실
-
-**실행:**
 ```bash
-# .env 설정
-SESSION_STORE_TYPE=memory
-SESSION_TTL_SECONDS=1800
+# 1. WebSocket 서버 (먼저 실행)
+cd ~/Projects/ai-voice-home-assistant/websocket_server
+python main.py
+# → http://localhost:21000
 
-# 서버 실행 (단일 워커)
+# 2. API 서버
+cd ~/Projects/chat-agent
 python src/api_server.py
-# 또는
-uvicorn src.api_server:app --host 0.0.0.0 --port 24000 --workers 1
+# → http://localhost:23000
 ```
 
-### Redis 기반
+### 2. 클라이언트 플로우
 
-**장점:**
-- 멀티 워커 지원
-- 영구 저장 가능 (persistence 설정에 따라)
-- 서버 재시작 후에도 세션 유지
-
-**요구 사항:**
-- Redis 서버 필요
-
-**실행:**
-```bash
-# 1. Redis 서버 시작 (메모리 전용 - persistence 비활성화)
-redis-server --save "" --appendonly no
-
-# 2. .env 설정
-SESSION_STORE_TYPE=redis
-SESSION_TTL_SECONDS=1800
-REDIS_URL=redis://localhost:6379/0
-
-# 3. 서버 실행 (멀티 워커 가능)
-uvicorn src.api_server:app --host 0.0.0.0 --port 24000 --workers 4
-```
-
-## CLI 사용 예시
-
-### 세션 이름 지정
-
-CLI는 **세션 이름**을 지정하여 여러 독립적인 대화 컨텍스트를 관리할 수 있습니다:
+#### Step 1: 세션 생성
 
 ```bash
-# 기본 세션 (default)
-python src/main.py
+curl -X POST http://localhost:23000/v1/sessions \
+  -H "Content-Type: application/json"
 
-# 'work' 세션 사용
-python src/main.py work
-
-# 'personal' 세션 사용
-python src/main.py personal
-
-# 'project1' 세션 사용
-python src/main.py project1
-
-# 출력 예시:
-# ============================================================
-# Chat Agent CLI
-# ============================================================
-# Session Name: work
-# Session ID: cli-work-abc123...
-# Session Store: memory
-# Loaded History: 4 messages  (이전 대화가 있을 경우)
-# ============================================================
-```
-
-**세션 이름의 장점:**
-- 업무용(`work`), 개인용(`personal`)으로 대화 분리
-- 프로젝트별(`project1`, `project2`) 별도 컨텍스트 관리
-- 각 세션은 독립적인 대화 히스토리 유지
-
-**사용 가능한 명령어:**
-- `session` - 현재 세션 정보 보기
-- `sessions` - 모든 사용 가능한 세션 목록 보기
-- `new` - 현재 세션 이름으로 새로운 세션 ID 생성
-- `reset` - 현재 세션의 대화 기록만 삭제
-- `prompt` - 시스템 프롬프트 보기
-- `quit` / `exit` / `bye` - 종료
-
-**세션 동작 방식:**
-1. 첫 실행: 세션 이름으로 새 세션 ID 생성, `.sessions/<name>.session` 파일에 저장
-2. 재실행: 저장된 세션 ID로 이전 대화 복원 (store type에 따라)
-3. `new` 명령: 같은 이름으로 새 세션 ID 생성
-
-**예시:**
-```bash
-# work 세션 시작
-$ python src/main.py work
-
-You: 내 이름은 김철수야
-Agent: 반갑습니다, 김철수님!
-
-You: sessions
-=== Available Sessions ===
-1. default
-2. personal
-3. work (current)
-
-To switch sessions, restart with:
-  python src/main.py <session_name>
-===
-
-You: quit
-Goodbye!
-
-# 나중에 work 세션 재개 - 대화 히스토리 복원됨!
-$ python src/main.py work
-# Session Name: work
-# Loaded History: 2 messages  ← 이전 대화 복원!
-
-You: 내 이름이 뭐였지?
-Agent: 김철수님이라고 말씀하셨습니다.
-
-# 다른 세션으로 전환 - 완전히 다른 컨텍스트
-$ python src/main.py personal
-# Session Name: personal
-# Loaded History: 0 messages  ← 새로운 대화
-
-You: 내 이름은 이영희야
-Agent: 반갑습니다, 이영희님!
-```
-
-## API 사용 예시
-
-### 세션 ID 전달 방법
-
-OpenAI 호환 API의 system 메시지에 세션 ID를 포함합니다:
-
-```json
+# 응답:
 {
-  "model": "google/gemma-3-27b-it",
-  "messages": [
-    {
-      "role": "system",
-      "content": "session_id: user-work-session"
-    },
-    {
-      "role": "user",
-      "content": "안녕하세요"
-    }
-  ]
+  "session_id": "abc-123-def-456",
+  "created_at": 1732500000,
+  "expires_at": 1732501800,
+  "message": "Session created successfully. Connect to WebSocket server with this session_id."
 }
 ```
 
-**세션 ID 규칙:**
-- 세션 ID를 제공하지 않으면 자동으로 UUID가 생성됩니다
-- **같은 세션 ID를 사용하면 이전 대화가 복원됩니다** ✅
-- 세션 ID는 자유롭게 지정 가능 (예: `user-work`, `customer-123`, `project-abc`)
+#### Step 2: WebSocket 연결
 
-**멀티턴 대화 예시:**
+```javascript
+// JavaScript 예시
+const sessionId = "abc-123-def-456";
+const ws = new WebSocket(`ws://localhost:21000/ws/${sessionId}`);
 
-첫 번째 요청:
+ws.onopen = () => {
+  console.log("Connected to WebSocket");
+};
+
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+
+  if (data.type === "request") {
+    // Home Assistant 요청 처리
+    handleHomeAssistantRequest(data.request_id, data.data);
+  }
+};
+
+function handleHomeAssistantRequest(requestId, data) {
+  // 기기 제어 등 처리
+  const result = controlDevice(data);
+
+  // 응답 전송
+  ws.send(JSON.stringify({
+    type: "response",
+    request_id: requestId,
+    result: result
+  }));
+}
+```
+
+#### Step 3: Chat API 호출
+
 ```bash
-curl -X POST http://localhost:24000/v1/chat/completions \
+curl -X POST http://localhost:23000/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "X-Session-ID: abc-123-def-456" \
   -d '{
     "messages": [
-      {"role": "system", "content": "session_id: my-work-session"},
-      {"role": "user", "content": "내 이름은 김철수야"}
+      {"role": "user", "content": "거실 불 켜줘"}
     ]
   }'
 ```
 
-두 번째 요청 (같은 세션 ID 사용):
+**검증 프로세스:**
+1. ✅ `X-Session-ID` 헤더 존재
+2. ✅ 인증된 세션 (POST /v1/sessions로 생성됨)
+3. ✅ 만료되지 않음 (TTL 30분)
+4. ✅ WebSocket 연결됨
+
+**실패 시 에러:**
+- `400`: X-Session-ID 헤더 없음
+- `401`: 인증되지 않은 세션 또는 만료된 세션
+- `400`: WebSocket 연결 안 됨
+
+### 3. 세션 관리
+
+#### 세션 정보 조회
+
 ```bash
-curl -X POST http://localhost:24000/v1/chat/completions \
+curl -X GET http://localhost:23000/v1/sessions/abc-123-def-456
+
+# 응답:
+{
+  "session_id": "abc-123-def-456",
+  "created_at": 1732500000,
+  "expires_at": 1732501800,
+  "last_activity": 1732500500,
+  "websocket_connected": true,
+  "chat_history_count": 10
+}
+```
+
+#### 대화 히스토리 초기화
+
+```bash
+curl -X POST http://localhost:23000/v1/sessions/abc-123-def-456/reset
+# 세션은 유지, 대화 기록만 삭제
+```
+
+#### 세션 완전 삭제
+
+```bash
+curl -X DELETE http://localhost:23000/v1/sessions/abc-123-def-456
+
+# 다음이 모두 삭제됨:
+# 1. 인증 세션 (AUTHORIZED_SESSIONS)
+# 2. WebSocket 연결
+# 3. 대화 히스토리
+```
+
+## 세션 생명주기
+
+### 정상 플로우
+
+```
+1. 생성: POST /v1/sessions
+   └─→ AUTHORIZED_SESSIONS에 등록
+   └─→ expires_at = now + 30분
+
+2. WebSocket 연결: ws://.../ws/{session_id}
+   └─→ connections에 등록
+
+3. Chat 사용: POST /v1/chat/completions
+   └─→ 검증 통과
+   └─→ expires_at 갱신 (활동 시 30분 연장)
+   └─→ last_activity 업데이트
+
+4. 30분 미사용
+   └─→ 백그라운드 정리 작업 (5분마다)
+   └─→ 인증 세션 삭제
+   └─→ WebSocket 연결 해제
+   └─→ 대화 히스토리 삭제 (SessionStore TTL)
+```
+
+### 비정상 종료 처리
+
+```
+WebSocket 연결 끊김 (클라이언트 종료, 네트워크 오류 등)
+└─→ WebSocket Server: connections에서 즉시 삭제
+└─→ 다음 Chat API 호출 시:
+    └─→ WebSocket 연결 확인 실패
+    └─→ 400 에러 반환
+    └─→ 클라이언트는 재연결 필요
+```
+
+## 보안
+
+### 현재 구현
+
+- ✅ 세션 ID는 UUID로 예측 불가능
+- ✅ WebSocket 연결 필수 (임의 접근 방지)
+- ✅ TTL 기반 자동 만료 (30분)
+- ⚠️ 인증 없음 (누구나 세션 생성 가능)
+
+### 추후 인증 시스템 추가 예정
+
+```bash
+# 세션 생성 시 API 키 검증
+curl -X POST http://localhost:23000/v1/sessions \
   -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {"role": "system", "content": "session_id: my-work-session"},
-      {"role": "user", "content": "내 이름이 뭐였지?"}
-    ]
-  }'
-# 응답: "김철수님이라고 말씀하셨습니다."  ← 이전 대화 기억!
+  -d '{"api_key": "your-api-key-here"}'
+
+# 검증 과정:
+# 1. API 키 유효성 확인
+# 2. 사용자 정보 연결
+# 3. 권한 확인
+# 4. 세션 발급
 ```
 
-다른 세션 (다른 세션 ID):
-```bash
-curl -X POST http://localhost:24000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {"role": "system", "content": "session_id: my-personal-session"},
-      {"role": "user", "content": "내 이름이 뭐였지?"}
-    ]
-  }'
-# 응답: "죄송합니다, 아직 말씀하지 않으셨습니다."  ← 다른 세션!
-```
-
-### 세션 관리 엔드포인트
-
-**세션 삭제:**
-```bash
-curl -X DELETE http://localhost:24000/v1/sessions/{session_id}
-```
-
-**세션 초기화:**
-```bash
-curl -X POST http://localhost:24000/v1/sessions/{session_id}/reset
-```
-
-## 세션 수명 주기
-
-### CLI (main.py)
-
-**Memory 모드:**
-1. 첫 실행: 새 세션 생성, `.cli_session_id`에 저장
-2. 재실행: 세션 ID로 히스토리 로드 (프로그램 종료 후 30분 이내)
-3. 30분 경과: 백그라운드 정리 작업이 세션 삭제
-4. 재실행 (30분 후): 세션 ID는 동일하지만 히스토리 없음
-
-**Redis 모드:**
-1. 첫 실행: 새 세션 생성, `.cli_session_id`에 저장
-2. 재실행: Redis에서 히스토리 로드 (언제든 가능)
-3. 30분 미사용: Redis TTL로 자동 만료
-4. 재실행 (만료 후): 세션 ID는 동일하지만 히스토리 없음
-
-### API (api_server.py)
-
-**Memory 모드:**
-1. 첫 요청: 새 세션 생성
-2. 후속 요청: 기존 히스토리 로드
-3. 30분 미사용: 백그라운드 태스크가 자동 삭제
-4. 서버 재시작: 모든 세션 손실
-
-**Redis 모드:**
-1. 첫 요청: 새 세션 생성 (Redis에 저장)
-2. 후속 요청: Redis에서 히스토리 로드
-3. 30분 미사용: Redis TTL로 자동 만료
-4. 서버 재시작: 세션 유지 (Redis에 보관됨)
-
-## 전환 가이드
-
-### Memory → Redis 전환
-
-1. Redis 서버 설치 및 실행
-2. `.env` 파일 수정:
-   ```bash
-   SESSION_STORE_TYPE=redis
-   REDIS_URL=redis://localhost:6379/0
-   ```
-3. 서버 재시작
-
-코드 수정 불필요! ✅
+**코드 위치:**
+- [src/api_server.py:330](src/api_server.py#L330) - `# TODO: 인증 로직 추가`
 
 ## 모니터링
 
-세션 관리 로그 예시:
+### 로그 메시지
 
 ```
-[SessionStore] Initialized with type: memory, TTL: 1800s
-[ChatAgent] Loaded 4 messages for session: abc-123
-[ChatAgent] Saved 6 messages for session: abc-123
-[Background] Session cleanup task started (5 minute interval)
-[Background] Cleaned up 3 expired sessions
+# 세션 생성
+[Session] Created: abc-123-def-456
+
+# WebSocket 연결 확인
+[WebSocket] Failed to check connection for abc-123: Connection refused
+
+# 백그라운드 정리
+[Background] Expired session: abc-123-def-456
+[Background] Disconnected WebSocket for expired session: abc-123-def-456
+[Background] Cleaned up 3 expired chat histories
+[Background] Total cleaned: 3 sessions
 ```
 
-## 보안 고려사항
+### 세션 상태 확인
 
-### Memory 모드
-- ✅ 디스크에 저장 안 됨
-- ✅ 서버 재시작 시 자동 삭제
-- ✅ TTL로 자동 만료
+```bash
+# API 서버에서 관리 중인 세션 수
+# (현재는 로그로만 확인 가능, 추후 API 추가 예정)
 
-### Redis 모드
-- ⚠️ Redis persistence 비활성화 권장 (완전 메모리 기반):
-  ```bash
-  redis-server --save "" --appendonly no
-  ```
-- ✅ Redis TTL로 자동 만료
-- ✅ 네트워크 격리 권장 (localhost만 허용)
+# WebSocket 서버 헬스체크 (연결된 세션 확인)
+curl http://localhost:21000/health
+```
 
 ## 문제 해결
 
-### Q: 대화 히스토리가 유지되지 않음
-- 세션 ID가 올바르게 전달되는지 확인
-- 서버 로그에서 `[ChatAgent] Loaded X messages` 확인
-- TTL 시간 확인 (기본 30분)
+### Q: 세션 생성 후 Chat API 사용 시 400 에러
 
-### Q: 멀티 워커 사용 시 세션이 끊김
-- `SESSION_STORE_TYPE=redis`로 설정했는지 확인
-- Redis 서버가 실행 중인지 확인
+**에러:** `Session X is not connected to WebSocket server`
 
-### Q: 메모리 사용량이 계속 증가
-- 백그라운드 정리 작업이 실행 중인지 확인
-- `SESSION_TTL_SECONDS` 값 조정
-- Redis 모드로 전환 고려
+**원인:** WebSocket 연결 안 됨
+
+**해결:**
+1. WebSocket 서버 실행 확인: `curl http://localhost:21000/health`
+2. 클라이언트에서 WebSocket 연결: `ws://localhost:21000/ws/{session_id}`
+3. 연결 상태 확인: `GET /v1/sessions/{session_id}` → `websocket_connected: true`
+
+### Q: 401 Unauthorized session
+
+**원인:**
+- 세션 ID가 발급되지 않음
+- 세션이 만료됨 (30분)
+
+**해결:**
+1. 새 세션 생성: `POST /v1/sessions`
+2. 받은 session_id 사용
+
+### Q: WebSocket 연결이 자주 끊김
+
+**원인:** 네트워크 불안정, 타임아웃
+
+**해결:**
+```javascript
+// 주기적으로 ping 전송
+setInterval(() => {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "ping" }));
+  }
+}, 30000); // 30초마다
+
+// 재연결 로직
+ws.onclose = () => {
+  console.log("Disconnected, reconnecting...");
+  setTimeout(connectWebSocket, 1000);
+};
+```
+
+### Q: 서버 재시작 후 세션이 사라짐
+
+**현재 동작:**
+- 인증 세션 (AUTHORIZED_SESSIONS): 메모리 저장 → 재시작 시 손실
+- 대화 히스토리: SESSION_STORE_TYPE에 따라 다름
+  - `memory`: 손실
+  - `redis`: 유지 (하지만 인증 세션이 없어서 사용 불가)
+
+**해결:**
+- 서버 재시작 후 클라이언트는 새 세션 생성 필요
+- 추후 개선: 인증 세션도 Redis에 저장 가능
 
 ## 성능
 
-### Memory 모드
-- 읽기/쓰기: < 1ms
-- 메모리: ~1KB per session (10개 메시지 기준)
+### 메모리 사용량
 
-### Redis 모드
-- 읽기/쓰기: ~2-5ms (로컬 Redis)
-- 메모리: Redis에서 관리
+- 인증 세션: ~200 bytes per session
+- WebSocket 연결: ~1KB per connection
+- 대화 히스토리: ~1KB per 10 messages
+
+### 응답 시간
+
+- 세션 생성: < 5ms
+- 세션 검증: < 10ms (WebSocket 연결 확인 포함)
+- Chat API: LLM 응답 시간에 따라 다름
+
+### 권장 설정
+
+- 단일 서버: 1000 동시 세션까지 무리 없음
+- 멀티 워커 필요 시: Redis 모드 사용
+- SESSION_TTL_SECONDS 조정으로 메모리 관리
 
 ## 다음 단계
 
-현재 구현으로 충분한 경우가 많지만, 필요에 따라 다음 기능 추가 가능:
+### 필수 (보안)
+- [ ] API 키 기반 인증 시스템
+- [ ] 사용자별 권한 관리
+- [ ] Rate limiting
 
-- [ ] PostgreSQL 백엔드 (장기 보관)
-- [ ] 세션 통계 API
-- [ ] 세션 병합/이동 기능
-- [ ] 사용자 인증 통합
+### 선택 (기능 개선)
+- [ ] 세션 목록 조회 API
+- [ ] 세션 연장 API (TTL 수동 갱신)
+- [ ] WebSocket 재연결 자동화
+- [ ] 세션 통계 (생성/만료/활성 수)
+
+### 선택 (인프라)
+- [ ] 인증 세션도 Redis에 저장 (서버 재시작 대응)
+- [ ] PostgreSQL 기반 장기 보관
+- [ ] 세션 백업/복구
+
+## 참고
+
+### 관련 파일
+
+- API 서버: [src/api_server.py](src/api_server.py)
+- WebSocket 서버: `~/Projects/ai-voice-home-assistant/websocket_server/main.py`
+- SessionStore: [src/utils/session_store.py](src/utils/session_store.py)
+- 설정 예시: [.env.example](.env.example)
+
+### 외부 의존성
+
+- WebSocket 서버: `ai-voice-home-assistant` 프로젝트
+- Redis (선택): SESSION_STORE_TYPE=redis 일 때

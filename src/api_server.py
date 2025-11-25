@@ -9,7 +9,7 @@ import time
 import logging
 from typing import List, Optional, Dict, Any, Union
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from agents.chat_agent import ChatAgent
@@ -22,6 +22,7 @@ from utils.agent_factory import (
 )
 from tools.memory_tools import create_memory
 import uvicorn
+import httpx
 
 from langfuse import get_client, propagate_attributes
 
@@ -103,6 +104,16 @@ LANGFUSE_ENABLED = initialize_langfuse(verbose=True)
 
 # Create shared memory instance
 MEMORY = create_memory()
+
+# Store for authorized sessions (session_id -> creation_time)
+# 나중에 인증 시스템 추가 시 사용자 정보도 포함
+AUTHORIZED_SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+# WebSocket server URL
+WEBSOCKET_SERVER_URL = os.getenv("WEBSOCKET_SERVER_URL", "http://localhost:21000")
+
+# HTTP client for WebSocket server communication
+http_client = httpx.AsyncClient(timeout=5.0)
 
 # FastAPI app
 app = FastAPI(
@@ -225,6 +236,33 @@ def convert_messages_to_chat_history(messages: List[Message], agent: ChatAgent):
             pass
 
 
+async def check_websocket_connection(session_id: str) -> bool:
+    """Check if session is connected to WebSocket server"""
+    try:
+        response = await http_client.get(
+            f"{WEBSOCKET_SERVER_URL}/api/sessions/{session_id}/status"
+        )
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("connected", False)
+        return False
+    except Exception as e:
+        print(f"[WebSocket] Failed to check connection for {session_id}: {e}")
+        return False
+
+
+async def disconnect_websocket_session(session_id: str) -> bool:
+    """Disconnect session from WebSocket server"""
+    try:
+        response = await http_client.delete(
+            f"{WEBSOCKET_SERVER_URL}/api/sessions/{session_id}"
+        )
+        return response.status_code in [200, 404]  # 404는 이미 연결 해제된 경우
+    except Exception as e:
+        print(f"[WebSocket] Failed to disconnect {session_id}: {e}")
+        return False
+
+
 @app.get("/")
 async def root():
     """Root endpoint"""
@@ -264,28 +302,108 @@ async def list_models():
     }
 
 
+class SessionCreateRequest(BaseModel):
+    """세션 생성 요청 (나중에 인증 정보 추가 예정)"""
+    api_key: Optional[str] = Field(default=None, description="API 키 (추후 인증용)")
+
+
+class SessionCreateResponse(BaseModel):
+    """세션 생성 응답"""
+    session_id: str
+    created_at: int
+    expires_at: Optional[int] = None
+    message: str
+
+
+@app.post("/v1/sessions", response_model=SessionCreateResponse)
+async def create_session(request: Optional[SessionCreateRequest] = None):
+    """
+    새 세션 생성
+
+    나중에 인증 시스템 추가 시:
+    - API 키 검증
+    - 사용자 정보 연결
+    - 권한 확인
+
+    현재는 인증 없이 세션 ID 발급
+    """
+    # TODO: 인증 로직 추가
+    # if request and request.api_key:
+    #     # 인증 처리
+    #     pass
+
+    # 세션 ID 생성
+    session_id = str(uuid.uuid4())
+
+    # 세션 정보 저장
+    ttl_seconds = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
+    AUTHORIZED_SESSIONS[session_id] = {
+        "created_at": int(time.time()),
+        "expires_at": int(time.time()) + ttl_seconds,
+        "api_key": request.api_key if request else None,
+        # 나중에 사용자 정보 추가
+    }
+
+    print(f"[Session] Created: {session_id}")
+
+    return SessionCreateResponse(
+        session_id=session_id,
+        created_at=AUTHORIZED_SESSIONS[session_id]["created_at"],
+        expires_at=AUTHORIZED_SESSIONS[session_id]["expires_at"],
+        message="Session created successfully. Connect to WebSocket server with this session_id."
+    )
+
+
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(
+    request: ChatCompletionRequest,
+    x_session_id: Optional[str] = Header(None, alias="X-Session-ID")
+):
     """
     Create a chat completion (OpenAI compatible)
 
     Supports both streaming and non-streaming responses.
-    Use session_id in messages to maintain conversation history.
+    Requires X-Session-ID header for authentication and WebSocket connection.
     """
     try:
-        # Extract session ID from messages if provided (custom extension)
-        session_id = None
-        for msg in request.messages:
-            if msg.role == "system" and "session_id:" in msg.content:
-                # Format: "session_id: <uuid>"
-                parts = msg.content.split("session_id:")
-                if len(parts) > 1:
-                    session_id = parts[1].strip().split()[0]
-                    break
+        # 1. 세션 ID 확인 (헤더에서)
+        session_id = x_session_id
 
-        # Generate session ID if not provided
         if not session_id:
-            session_id = str(uuid.uuid4())
+            raise HTTPException(
+                status_code=400,
+                detail="X-Session-ID header is required. Create a session first: POST /v1/sessions"
+            )
+
+        # 2. 인증된 세션인지 확인
+        if session_id not in AUTHORIZED_SESSIONS:
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized session. Create a session first: POST /v1/sessions"
+            )
+
+        # 3. 세션 만료 확인
+        session_info = AUTHORIZED_SESSIONS[session_id]
+        if session_info["expires_at"] < time.time():
+            # 만료된 세션 제거
+            del AUTHORIZED_SESSIONS[session_id]
+            raise HTTPException(
+                status_code=401,
+                detail="Session expired. Create a new session: POST /v1/sessions"
+            )
+
+        # 4. WebSocket 연결 확인
+        ws_connected = await check_websocket_connection(session_id)
+        if not ws_connected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Session {session_id} is not connected to WebSocket server. Connect first: ws://<server>/ws/{session_id}"
+            )
+
+        # 5. 세션 활동 시간 갱신 (TTL 연장)
+        ttl_seconds = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
+        session_info["expires_at"] = int(time.time()) + ttl_seconds
+        session_info["last_activity"] = int(time.time())
 
         # Create agent for session (chat history automatically loaded)
         agent = create_agent_for_session(session_id, request.model, request.temperature)
@@ -426,27 +544,87 @@ async def chat_completions(request: ChatCompletionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class SessionInfo(BaseModel):
+    """세션 정보"""
+    session_id: str
+    created_at: int
+    expires_at: int
+    last_activity: Optional[int] = None
+    websocket_connected: bool
+    chat_history_count: int
+
+
+@app.get("/v1/sessions/{session_id}", response_model=SessionInfo)
+async def get_session(session_id: str):
+    """세션 정보 조회"""
+    # 1. 인증된 세션인지 확인
+    if session_id not in AUTHORIZED_SESSIONS:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # 2. 세션 정보 가져오기
+    session_info = AUTHORIZED_SESSIONS[session_id]
+
+    # 3. WebSocket 연결 상태 확인
+    ws_connected = await check_websocket_connection(session_id)
+
+    # 4. 대화 히스토리 개수 확인
+    from utils.session_store import session_store
+    history = session_store.get_history(session_id)
+    chat_history_count = len(history.messages)
+
+    return SessionInfo(
+        session_id=session_id,
+        created_at=session_info["created_at"],
+        expires_at=session_info["expires_at"],
+        last_activity=session_info.get("last_activity"),
+        websocket_connected=ws_connected,
+        chat_history_count=chat_history_count
+    )
+
+
 @app.delete("/v1/sessions/{session_id}")
 async def delete_session(session_id: str):
-    """Delete a session and its chat history"""
+    """세션 삭제 (인증, WebSocket 연결, 대화 히스토리 모두 삭제)"""
     from utils.session_store import session_store
 
-    success = session_store.delete_session(session_id)
-    if success:
-        return {"message": f"Session {session_id} deleted"}
-    else:
-        raise HTTPException(status_code=404, detail="Session not found")
+    # 1. 인증 세션 삭제
+    if session_id in AUTHORIZED_SESSIONS:
+        del AUTHORIZED_SESSIONS[session_id]
+        print(f"[Session] Deleted from authorized sessions: {session_id}")
+
+    # 2. WebSocket 연결 해제
+    ws_disconnected = await disconnect_websocket_session(session_id)
+    if ws_disconnected:
+        print(f"[Session] Disconnected from WebSocket: {session_id}")
+
+    # 3. 대화 히스토리 삭제
+    history_deleted = session_store.delete_session(session_id)
+    if history_deleted:
+        print(f"[Session] Deleted chat history: {session_id}")
+
+    return {
+        "message": f"Session {session_id} deleted completely",
+        "session_id": session_id,
+        "auth_deleted": True,
+        "websocket_disconnected": ws_disconnected,
+        "history_deleted": history_deleted
+    }
 
 
 @app.post("/v1/sessions/{session_id}/reset")
 async def reset_session(session_id: str):
-    """Reset chat history for a session"""
+    """대화 히스토리만 초기화 (세션은 유지)"""
     from utils.session_store import session_store
+
+    # 1. 인증된 세션인지 확인
+    if session_id not in AUTHORIZED_SESSIONS:
+        raise HTTPException(status_code=404, detail="Session not found")
 
     try:
         history = session_store.get_history(session_id)
         history.clear()
-        return {"message": f"Session {session_id} reset"}
+        print(f"[Session] Reset chat history: {session_id}")
+        return {"message": f"Session {session_id} chat history reset"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset session: {str(e)}")
 
@@ -460,14 +638,45 @@ async def startup_event():
     async def cleanup_loop():
         while True:
             await asyncio.sleep(300)  # Check every 5 minutes
-            cleaned = session_store.cleanup_expired_sessions()
-            if cleaned > 0:
-                print(f"[Background] Cleaned up {cleaned} expired sessions")
 
-    # Only run cleanup for memory-based storage
-    if session_store.store_type == "memory":
-        asyncio.create_task(cleanup_loop())
-        print("[Background] Session cleanup task started (5 minute interval)")
+            # 1. 만료된 인증 세션 정리
+            current_time = int(time.time())
+            expired_sessions = []
+
+            for session_id, session_info in list(AUTHORIZED_SESSIONS.items()):
+                if session_info["expires_at"] < current_time:
+                    expired_sessions.append(session_id)
+
+            for session_id in expired_sessions:
+                # 인증 세션 삭제
+                del AUTHORIZED_SESSIONS[session_id]
+                print(f"[Background] Expired session: {session_id}")
+
+                # WebSocket 연결 해제
+                ws_disconnected = await disconnect_websocket_session(session_id)
+                if ws_disconnected:
+                    print(f"[Background] Disconnected WebSocket for expired session: {session_id}")
+
+            # 2. 대화 히스토리 정리 (memory 모드만)
+            if session_store.store_type == "memory":
+                cleaned = session_store.cleanup_expired_sessions()
+                if cleaned > 0:
+                    print(f"[Background] Cleaned up {cleaned} expired chat histories")
+
+            if expired_sessions:
+                print(f"[Background] Total cleaned: {len(expired_sessions)} sessions")
+
+    # 백그라운드 정리 작업 시작
+    asyncio.create_task(cleanup_loop())
+    print("[Background] Session cleanup task started (5 minute interval)")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown"""
+    # Close HTTP client
+    await http_client.aclose()
+    print("[Shutdown] HTTP client closed")
 
 
 def main():
