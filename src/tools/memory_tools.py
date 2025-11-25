@@ -23,10 +23,17 @@ class MemorySearchTool(BaseTool):
 
     name: str = "search_memory"
     description: str = (
-        "Search through past conversations and memories. "
-        "Use this tool to recall what was discussed before, find information "
-        "from previous interactions, or remember user preferences and context. "
-        "Input should be a natural language query describing what you're looking for."
+        "This tool provides semantic search capabilities for conversation history and memories using mem0.\n\n"
+        "    Available Tools:\n"
+        "    - search_memory(query, limit): Search through past conversations and memories using semantic search\n\n"
+        "    Use Cases:\n"
+        "    - Recalling what was discussed in previous conversations\n"
+        "    - Finding specific information from past interactions\n"
+        "    - Remembering user preferences and context from earlier sessions\n"
+        "    - Looking up details mentioned in previous chats\n\n"
+        "    Data Source:\n"
+        "    - mem0 Memory System (https://mem0.ai/)\n"
+        "    - Provides semantic search over conversation history"
     )
     args_schema: type[BaseModel] = MemorySearchInput
     memory: Any = Field(default=None, exclude=True)
@@ -97,9 +104,17 @@ class MemoryGetAllTool(BaseTool):
 
     name: str = "get_all_memories"
     description: str = (
-        "Retrieve recent memories and conversation history. "
-        "Use this to get a general overview of past interactions "
-        "without a specific search query."
+        "This tool provides access to recent conversation memories and interaction history using mem0.\n\n"
+        "    Available Tools:\n"
+        "    - get_all_memories(limit): Retrieve recent memories and conversation history in chronological order\n\n"
+        "    Use Cases:\n"
+        "    - Getting a general overview of recent interactions\n"
+        "    - Reviewing conversation history without a specific search query\n"
+        "    - Understanding the context of recent user sessions\n"
+        "    - Browsing through stored memories chronologically\n\n"
+        "    Data Source:\n"
+        "    - mem0 Memory System (https://mem0.ai/)\n"
+        "    - Provides chronological access to stored conversation memories"
     )
     args_schema: type[BaseModel] = MemoryGetAllInput
     memory: Any = Field(default=None, exclude=True)

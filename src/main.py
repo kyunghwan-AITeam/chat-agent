@@ -138,7 +138,9 @@ def main():
         except Exception as e:
             print(f"Warning: Could not initialize Langfuse: {e}")
             langfuse_enabled = False
-
+    
+    for memory_tools in memory_tools:
+        agent_instructions.update({memory_tools.name : memory_tools.description}) 
     # Build dynamic system prompt based on MCP servers
     system_prompt = build_home_assistant_prompt(
         agent_instructions=agent_instructions if agent_instructions else None,

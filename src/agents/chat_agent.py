@@ -110,13 +110,17 @@ class ChatAgent:
 
         return (thought, tool_call, remaining_text)
 
-    def _parse_pythonic_tool_calls(self, content: str) -> List[Dict[str, Any]]:
+    def _parse_pythonic_tool_calls(self, content: str, max_retries: int = 2) -> List[Dict[str, Any]]:
         """Parse pythonic format tool calls from model response (for Gemma 3)
 
         Handles:
         1. Tagged format: <TOOL_CALL>[func1(arg1='val1')]</TOOL_CALL>
         2. Markdown code blocks: ```[func1(arg1='val1')]```
         3. Plain format: [func1(arg1='val1')]
+
+        Args:
+            content: Model response content
+            max_retries: Maximum number of LLM correction attempts (default: 2)
 
         Returns list of dicts: [{'name': 'func1', 'args': {'arg1': 'val1'}}, ...]
         """
@@ -143,47 +147,92 @@ class ChatAgent:
                 print("No json agent calls found in content.")
                 return []
 
-        try:
-            # Parse as Python AST
-            agent_call = json.loads(agent_call_str)
-            # tree = ast.parse(content, mode='eval')
-            # if not isinstance(tree.body, ast.List):
-            #     return []
+        # Try parsing JSON with LLM correction on failure
+        for attempt in range(max_retries + 1):
+            try:
+                # Parse as JSON
+                agent_call = json.loads(agent_call_str)
+                # tree = ast.parse(content, mode='eval')
+                # if not isinstance(tree.body, ast.List):
+                #     return []
 
-            # tool_calls = []
-            # for idx, call_node in enumerate(tree.body.elts):
-            #     if not isinstance(call_node, ast.Call):
-            #         continue
+                # tool_calls = []
+                # for idx, call_node in enumerate(tree.body.elts):
+                #     if not isinstance(call_node, ast.Call):
+                #         continue
 
-            #     # Extract function name
-            #     if isinstance(call_node.func, ast.Name):
-            #         func_name = call_node.func.id
-            #     else:
-            #         continue
+                #     # Extract function name
+                #     if isinstance(call_node.func, ast.Name):
+                #         func_name = call_node.func.id
+                #     else:
+                #         continue
 
-            #     # Extract arguments
-            #     args_dict = {}
-            #     for keyword in call_node.keywords:
-            #         arg_name = keyword.arg
-            #         try:
-            #             arg_value = ast.literal_eval(keyword.value)
-            #         except (ValueError, TypeError):
-            #             if isinstance(keyword.value, ast.Name):
-            #                 arg_value = keyword.value.id
-            #             else:
-            #                 continue
-            #         args_dict[arg_name] = arg_value
+                #     # Extract arguments
+                #     args_dict = {}
+                #     for keyword in call_node.keywords:
+                #         arg_name = keyword.arg
+                #         try:
+                #             arg_value = ast.literal_eval(keyword.value)
+                #         except (ValueError, TypeError):
+                #             if isinstance(keyword.value, ast.Name):
+                #                 arg_value = keyword.value.id
+                #             else:
+                #                 continue
+                #         args_dict[arg_name] = arg_value
 
-            #     tool_calls.append({
-            #         'name': func_name,
-            #         'args': args_dict,
-            #         'id': f'call_{idx}',
-            #         'type': 'tool_call'
-            #     })
+                #     tool_calls.append({
+                #         'name': func_name,
+                #         'args': args_dict,
+                #         'id': f'call_{idx}',
+                #         'type': 'tool_call'
+                #     })
 
-            return [agent_call]
-        except Exception:
-            return []
+                return [agent_call]
+            except json.JSONDecodeError as e:
+                if attempt < max_retries:
+                    # Ask LLM to fix the JSON
+                    print(f"\nJSON parsing failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                    print(f"Asking LLM to correct the JSON format...")
+
+                    correction_prompt = f"""
+/no_think                    
+The following JSON in <AGENT_CALL> tag has syntax errors:
+
+<AGENT_CALL>
+{agent_call_str}
+</AGENT_CALL>
+
+Error: {str(e)}
+
+Please fix the JSON syntax errors and return ONLY the corrected JSON inside <AGENT_CALL> tags. Do not include any explanations.
+The JSON should be valid and properly formatted."""
+
+                    try:
+                        correction_response = self.llm.invoke(
+                            correction_prompt,
+                            config={"callbacks": [self.handler]} if self.handler else {}
+                        )
+                        corrected_content = str(correction_response.content) if hasattr(correction_response, 'content') else str(correction_response)
+
+                        # Extract corrected JSON from response
+                        corrected_match = re.search(r'<AGENT_CALL>\s*(.*?)\s*</AGENT_CALL>', corrected_content, re.DOTALL)
+                        if corrected_match:
+                            agent_call_str = corrected_match.group(1).strip()
+                            print(f"LLM corrected JSON:\n{agent_call_str}")
+                        else:
+                            print("LLM failed to return corrected JSON in proper format")
+                            break
+                    except Exception as llm_error:
+                        print(f"LLM correction failed: {str(llm_error)}")
+                        break
+                else:
+                    print(f"\nFailed to parse JSON after {max_retries} correction attempts")
+                    return []
+            except Exception as e:
+                print(f"Unexpected error parsing tool calls: {str(e)}")
+                return []
+
+        return []
 
     def _handle_tool_calls(self, response: Any, original_message: str = "") -> str:
         """
